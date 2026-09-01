@@ -1757,6 +1757,80 @@ func TestGetChannelsRegionFiltering(t *testing.T) {
 	}
 }
 
+// TestGetChannelsRegionScopedPreview covers a case TestGetChannelsRegionFiltering
+// doesn't: a single channel with activity in multiple regions. The
+// lastMessage/lastSender preview must reflect the newest message *within
+// the selected region*, not the globally-newest message across all
+// regions — the sample_json subquery previously ignored the region filter
+// entirely, so a region-filtered sidebar always showed the global preview.
+func TestGetChannelsRegionScopedPreview(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer1', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs2', 'Observer2', 'SFO')`)
+
+	// Same channel, two messages from two different regions. Bob's message
+	// (SFO) is globally newer than Alice's (SJC).
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'hash1', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#shared","text":"Alice: Hello from SJC","sender":"Alice"}', '#shared')`)
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('BB', 'hash2', '2026-01-15T10:05:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#shared","text":"Bob: Hello from SFO","sender":"Bob"}', '#shared')`)
+
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, timestamp)
+		VALUES (1, 1, 12.0, -90, 1736935200)`) // Alice's message, seen only by the SJC observer
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, timestamp)
+		VALUES (2, 2, 14.0, -88, 1736935500)`) // Bob's message, seen only by the SFO observer
+
+	// Filtering to SJC: only Alice's message exists in that region, so the
+	// preview must show Alice's message — not Bob's globally-newer one.
+	sjc, err := db.GetChannels("SJC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sjc) != 1 {
+		t.Fatalf("expected 1 channel for SJC, got %d", len(sjc))
+	}
+	if sjc[0]["lastMessage"] != "Hello from SJC" {
+		t.Errorf("expected SJC-scoped lastMessage='Hello from SJC', got %q (region filter leaked the globally-latest message)", sjc[0]["lastMessage"])
+	}
+	if sjc[0]["lastSender"] != "Alice" {
+		t.Errorf("expected SJC-scoped lastSender='Alice', got %q", sjc[0]["lastSender"])
+	}
+	if sjc[0]["messageCount"] != 1 {
+		t.Errorf("expected messageCount=1 for SJC, got %v", sjc[0]["messageCount"])
+	}
+
+	// Filtering to SFO: only Bob's message exists in that region.
+	sfoShared, err := db.GetChannels("SFO")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sfoShared) != 1 {
+		t.Fatalf("expected 1 channel for SFO, got %d", len(sfoShared))
+	}
+	if sfoShared[0]["lastMessage"] != "Hello from SFO" {
+		t.Errorf("expected SFO-scoped lastMessage='Hello from SFO', got %q", sfoShared[0]["lastMessage"])
+	}
+	if sfoShared[0]["lastSender"] != "Bob" {
+		t.Errorf("expected SFO-scoped lastSender='Bob', got %q", sfoShared[0]["lastSender"])
+	}
+
+	// No region filter: the globally-newest message (Bob's) wins, same as before.
+	all, err := db.GetChannels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 channel with no filter, got %d", len(all))
+	}
+	if all[0]["lastMessage"] != "Hello from SFO" {
+		t.Errorf("expected unfiltered lastMessage='Hello from SFO', got %q", all[0]["lastMessage"])
+	}
+}
+
 func TestNodeTelemetryFields(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

@@ -62,6 +62,11 @@
   let nodeFilterShown = 0;
   // Region filter (#1045): observer_id → IATA code, populated from /api/observers
   let observerIataMap = {};
+  // Tracks the in-flight (or already-settled) /api/observers fetch that
+  // populates observerIataMap, so anything that depends on the map being
+  // ready (e.g. packet replay's region-match check) can await it instead of
+  // racing a fixed timer against an unbounded network fetch.
+  let observerIataMapReady = Promise.resolve();
   let regionFilterChangeHandler = null;
 
   /**
@@ -838,7 +843,7 @@
       resolved_path: pkt.resolved_path,
       _ts: new Date(pkt.timestamp || pkt.created_at).getTime(),
       decoded: { header: { payloadTypeName: typeName }, payload: raw, path: { hops } },
-      snr: pkt.snr, rssi: pkt.rssi, observer: pkt.observer_name
+      snr: pkt.snr, rssi: pkt.rssi, observer: pkt.observer_name, observer_id: pkt.observer_id, observer_iata: pkt.observer_iata
     };
   }
 
@@ -1559,7 +1564,18 @@
         // set VCR.mode='PAUSED' which froze anim.progress in
         // renderAnimations(), turning the replay into a blank, motionless map.
         suppressLive = true;
-        setTimeout(() => renderPacketTree(packets, true), 1500);
+        // Wait for both the original 1500ms settle delay AND the
+        // observer_id -> IATA map fetch (#1045's initLiveRegionFilter runs
+        // just after this block, kicked off around the same tick) — under
+        // server load that fetch can take longer than 1500ms, and
+        // packetMatchesRegion silently drops every replayed packet if the
+        // map isn't populated yet when a region filter is active. Racing a
+        // fixed timer against an unbounded fetch made this an intermittent,
+        // load-dependent failure instead of a deterministic one.
+        Promise.all([
+          new Promise((resolve) => setTimeout(resolve, 1500)),
+          Promise.resolve(observerIataMapReady)
+        ]).then(() => renderPacketTree(packets, true));
         // Clear the suppression after the replay window has elapsed (the
         // longest animation duration plus a margin) so live traffic resumes.
         setTimeout(() => { suppressLive = false; }, 12000);
@@ -1617,6 +1633,84 @@
       rebuildFeedList();
     });
 
+    // City-center lat/lon for each MeshTexas IATA region, used only to
+    // geographically reclassify nodes for the recenter/zoom below — NOT
+    // used for the region filter's actual show/hide logic, which stays
+    // observer-tag-based (server-side) as before. Same 12 codes/coords as
+    // livemap's REGION_CENTROIDS table.
+    var REGION_CENTROIDS = {
+      AUS: [30.2672, -97.7431],
+      SAT: [29.4241, -98.4936],
+      HOU: [29.7604, -95.3698],
+      DFW: [32.7767, -96.7970],
+      ELP: [31.7619, -106.4850],
+      ABI: [32.4487, -99.7331],
+      AMA: [35.2220, -101.8313],
+      MFE: [26.2034, -98.2300],
+      SJT: [31.4638, -100.4370],
+      TXK: [33.4418, -94.0377],
+      CRP: [27.8006, -97.3964],
+      ACT: [31.5493, -97.1467],
+    };
+
+    // Nearest-centroid classification by the node's own lat/lon (squared-
+    // degree distance is fine for nearest-neighbor comparison at Texas
+    // scale — no need for haversine here, we only care which centroid is
+    // closest, not the actual distance).
+    function nearestRegionCode(lat, lon) {
+      var best = null, bestDist = Infinity;
+      for (var code in REGION_CENTROIDS) {
+        var c = REGION_CENTROIDS[code];
+        var dLat = lat - c[0], dLon = lon - c[1];
+        var d = dLat * dLat + dLon * dLon;
+        if (d < bestDist) { bestDist = d; best = code; }
+      }
+      return best;
+    }
+
+    // Recenter/zoom the live map to fit the nodes currently on screen for
+    // the selected region(s). No-op for "All Regions" (selected is null/empty)
+    // or if the region has no located nodes yet — leaves the viewport as-is
+    // rather than jumping to a default.
+    //
+    // Classifies each node's region by its own real lat/lon (nearest
+    // centroid) rather than trusting the server's observer-tagged `iata` —
+    // the tag reflects who *observed* a packet, not where the device
+    // actually sits, so a node multi-hop-relayed through a distant
+    // observer would otherwise pull the recenter toward the wrong area
+    // (or, for genuinely bad fixes like sr-ripple's lat -62/lon 0, blow
+    // fitBounds out to a near-global view). This only affects where the
+    // camera lands — marker visibility/show-hide still follows the
+    // existing observer-tag-based region filter untouched.
+    function recenterMapToRegion(selected) {
+      if (!map) return;
+      if (!selected || !selected.length) {
+        // "All Regions" — frame the whole state via the fixed centroid
+        // table rather than whatever nodes happen to be loaded (which
+        // could look lopsided depending on ingest timing/coverage).
+        var allPts = [];
+        for (var rc in REGION_CENTROIDS) allPts.push(REGION_CENTROIDS[rc]);
+        try {
+          map.fitBounds(L.latLngBounds(allPts), { padding: [40, 40] });
+        } catch (e) {}
+        return;
+      }
+      var selectedSet = {};
+      for (var i = 0; i < selected.length; i++) selectedSet[String(selected[i]).toUpperCase()] = true;
+      var pts = [];
+      for (var key in nodeData) {
+        var n = nodeData[key];
+        if (n && n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0)) {
+          var region = nearestRegionCode(n.lat, n.lon);
+          if (region && selectedSet[region]) pts.push([n.lat, n.lon]);
+        }
+      }
+      if (!pts.length) return;
+      try {
+        map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 12 });
+      } catch (e) {}
+    }
+
     // Region filter (#1045): dropdown of observer IATA regions
     (function initLiveRegionFilter() {
       var rfEl = document.getElementById('liveRegionFilter');
@@ -1626,15 +1720,18 @@
       // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
       // Bug #1136: previously parsed as array → map empty → region filter
       // dropped every packet.
-      fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
+      observerIataMapReady = fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
         setObserverIataMap(buildObserverIataMap(data));
       }).catch(function() { /* leave map empty; filter will hide all when active */ });
       RegionFilter.init(rfEl, { dropdown: true });
-      regionFilterChangeHandler = RegionFilter.onChange(function() {
+      regionFilterChangeHandler = RegionFilter.onChange(async function(selected) {
         // #1108 — when the region selection changes, reload visible map
         // nodes so non-region nodes disappear (or reappear) immediately.
         // The packet feed already filters live via packetMatchesRegion.
-        try { loadNodes(); } catch (e) { /* loadNodes not yet defined during init order edge cases */ }
+        try {
+          await loadNodes();
+          recenterMapToRegion(selected);
+        } catch (e) { /* loadNodes not yet defined during init order edge cases */ }
       });
       // #1108 — "Show all nodes (faded)" sub-toggle, sibling to the region
       // dropdown. Off by default = hide non-region nodes; on = legacy

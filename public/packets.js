@@ -3371,12 +3371,25 @@
         if (obs.length > 1) {
           for (const o of obs) {
             const oPath = getParsedPath(o);
-            const oDec = getParsedDecoded(o);
+            // decoded_json is transmission-level (shared across all observations
+            // of this hash) and only lives on the top-level packet, not per
+            // observation — getParsedDecoded(o) here always returned {} since `o`
+            // never carries its own decoded_json, silently stripping the message
+            // content (channel text, sender, etc.) from every replayed packet
+            // whenever a transmission had more than one observation. Reuse the
+            // already-parsed top-level `decoded` instead.
             replayPackets.push({
               id: o.id, hash: pkt.hash, raw: o.raw_hex || pkt.raw_hex,
               _ts: new Date(o.timestamp).getTime(),
-              decoded: { header: { payloadTypeName: typeName }, payload: oDec, path: { hops: oPath } },
-              snr: o.snr, rssi: o.rssi, observer: obsName(o.observer_id)
+              decoded: { header: { payloadTypeName: typeName }, payload: decoded, path: { hops: oPath } },
+              // observer_id/observer_iata must be set here — live.js's
+              // renderPacketTree() silently drops any packet whose
+              // observer_id is missing when a region filter is active
+              // (packetMatchesRegion has nothing to match against).
+              // Passing only the human-readable name (as before) meant
+              // Replay always no-op'd for anyone with a region filter set.
+              snr: o.snr, rssi: o.rssi, observer: obsName(o.observer_id),
+              observer_id: o.observer_id, observer_iata: o.observer_iata
             });
           }
         } else {
@@ -3384,7 +3397,8 @@
             id: pkt.id, hash: pkt.hash, raw: pkt.raw_hex,
             _ts: new Date(pkt.timestamp).getTime(),
             decoded: { header: { payloadTypeName: typeName }, payload: decoded, path: { hops: pathHops } },
-            snr: pkt.snr, rssi: pkt.rssi, observer: obsName(pkt.observer_id)
+            snr: pkt.snr, rssi: pkt.rssi, observer: obsName(pkt.observer_id),
+            observer_id: pkt.observer_id, observer_iata: pkt.observer_iata
           });
         }
         sessionStorage.setItem('replay-packet', JSON.stringify(replayPackets));

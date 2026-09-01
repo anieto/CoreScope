@@ -1538,12 +1538,24 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 			args = append(args, code)
 		}
 		regionPlaceholder := strings.Join(placeholders, ",")
+		// The sample_json subquery picks the newest message per channel for
+		// the lastMessage/lastSender preview. It must be scoped by the same
+		// region filter as the outer query — otherwise the preview always
+		// shows the globally-latest message regardless of the selected
+		// region(s), even though msg_count/last_activity above are correctly
+		// scoped. Its placeholder appears first in the SQL text (the SELECT
+		// list is written before the WHERE clause), so its args must be
+		// bound first too.
+		args = append(append([]interface{}{}, args...), args...)
 		if db.isV3 {
 			querySQL = fmt.Sprintf(`SELECT t.channel_hash,
 					COUNT(*) AS msg_count,
 					MAX(t.first_seen) AS last_activity,
 					(SELECT t2.decoded_json FROM transmissions t2
+					 JOIN observations o2 ON o2.transmission_id = t2.id
+					 JOIN observers obs2 ON obs2.rowid = o2.observer_idx
 					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+					 AND obs2.rowid IS NOT NULL AND UPPER(TRIM(obs2.iata)) IN (%s)
 					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
 				FROM transmissions t
 				JOIN observations o ON o.transmission_id = t.id
@@ -1553,13 +1565,19 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 				AND t.channel_hash NOT LIKE 'enc_%%'
 				AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%s)
 				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
+				ORDER BY last_activity DESC`, regionPlaceholder, regionPlaceholder)
 		} else {
 			querySQL = fmt.Sprintf(`SELECT t.channel_hash,
 					COUNT(*) AS msg_count,
 					MAX(t.first_seen) AS last_activity,
 					(SELECT t2.decoded_json FROM transmissions t2
 					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+					 AND EXISTS (
+						SELECT 1 FROM observations o2
+						JOIN observers obs2 ON obs2.id = o2.observer_id
+						WHERE o2.transmission_id = t2.id
+						AND UPPER(TRIM(obs2.iata)) IN (%s)
+					 )
 					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
 				FROM transmissions t
 				JOIN observations o ON o.transmission_id = t.id
@@ -1572,7 +1590,7 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 					AND UPPER(TRIM(obs.iata)) IN (%s)
 				)
 				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
+				ORDER BY last_activity DESC`, regionPlaceholder, regionPlaceholder)
 		}
 	} else {
 		querySQL = `SELECT channel_hash,
