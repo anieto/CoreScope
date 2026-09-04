@@ -388,11 +388,6 @@ type PacketDetailResponse struct {
 	Observations     []ObservationResp `json:"observations,omitempty"`
 }
 
-type PacketIngestResponse struct {
-	ID      int64       `json:"id"`
-	Decoded interface{} `json:"decoded"`
-}
-
 type DecodeResponse struct {
 	Decoded interface{} `json:"decoded"`
 }
@@ -1044,6 +1039,7 @@ type ClientConfigResponse struct {
 	MapDarkTileProvider string                 `json:"mapDarkTileProvider,omitempty"` // deprecated. TODO: remove after v3.5.0
 	Customizer          CustomizerClientConfig `json:"customizer"`
 	ClientRxCoverage    bool                   `json:"clientRxCoverage"`
+	PathTrust           *PathTrustConfig       `json:"pathTrust,omitempty"`
 }
 
 // CustomizerClientConfig is the operator-side customizer-modal knobs that
