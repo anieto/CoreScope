@@ -35,15 +35,17 @@ const routeTypeNonTransportSQL = "route_type IN (1, 2)"
 
 // DB wraps a read-only connection to the MeshCore SQLite database.
 type DB struct {
-	conn                *sql.DB
-	path                string // filesystem path to the database file
-	isV3                bool   // v3 schema: observer_idx in observations (vs observer_id in v2)
-	hasResolvedPath     bool   // observations table has resolved_path column
-	hasObsRawHex        bool   // observations table has raw_hex column (#881)
-	hasScopeName        bool   // transmissions.scope_name column exists (#899)
-	hasDefaultScope     bool   // nodes.default_scope column exists (#899)
-	hasMultibyteSupCols bool   // nodes/inactive_nodes have multibyte_sup/multibyte_evidence (#903)
-	hasLastSeen         bool   // transmissions.last_seen column exists (#1690)
+	conn                    *sql.DB
+	path                    string // filesystem path to the database file
+	isV3                    bool   // v3 schema: observer_idx in observations (vs observer_id in v2)
+	hasResolvedPath         bool   // observations table has resolved_path column
+	hasObsRawHex            bool   // observations table has raw_hex column (#881)
+	hasScopeName            bool   // transmissions.scope_name column exists (#899)
+	hasDefaultScope         bool   // nodes.default_scope column exists (#899)
+	hasConfiguredScope      bool   // nodes.configured_scope column exists (#1865)
+	hasDeclaredRegionsTable bool   // node_declared_regions table exists (#1975, optional second scope source)
+	hasMultibyteSupCols     bool   // nodes/inactive_nodes have multibyte_sup/multibyte_evidence (#903)
+	hasLastSeen             bool   // transmissions.last_seen column exists (#1690)
 
 	// Channel list caches, keyed by region param — avoids repeated GROUP BY
 	// scans (#762). Keyed per-region (not a single slot) so mixed-region
@@ -234,6 +236,14 @@ func (db *DB) detectSchema(ctx context.Context, q rowQuerier) error {
 	}
 	db.hasDefaultScope = nodes["default_scope"]
 	db.hasMultibyteSupCols = nodes["multibyte_sup"]
+	db.hasConfiguredScope = nodes["configured_scope"]
+
+	// #1975: an optional second confirmed-scope source. Absent on a stock
+	// install, so schemaColumns returns nothing and the flag stays false;
+	// present on deployments that collect the same fact by another route.
+	// A missing table is not an error here.
+	ndr, ndrErr := schemaColumns(ctx, q, "node_declared_regions")
+	db.hasDeclaredRegionsTable = ndrErr == nil && len(ndr) > 0
 
 	if db.isV3 {
 		log.Printf("[db] schema mode: v3 (observer_idx)")
@@ -281,6 +291,10 @@ func (db *DB) nodeSelectCols() string {
 	cols := "public_key, name, role, lat, lon, last_seen, first_seen, advert_count, battery_mv, temperature_c, foreign_advert"
 	if db.hasDefaultScope {
 		cols += ", default_scope"
+	}
+	// #1865: confirmed scopes appended after default_scope; scan order must match.
+	if db.hasConfiguredScope {
+		cols += ", configured_scope, configured_scope_at"
 	}
 	return cols
 }
@@ -2080,10 +2094,16 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		idPlaceholders[i] = "?"
 		obsArgs[i] = id
 	}
+	// #1851: scope_name lives on the transmission row, so appending it as the
+	// last selected column is safe for both query shapes.
+	scopeNameCol := ""
+	if db.hasScopeName {
+		scopeNameCol = ", t.scope_name"
+	}
 	var obsSQL string
 	if db.isV3 {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				obs.id, obs.name, o.snr, o.path_json, o.timestamp
+				obs.id, obs.name, o.snr, o.path_json, o.timestamp` + scopeNameCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -2091,7 +2111,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			ORDER BY o.id ASC`
 	} else {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp
+				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp` + scopeNameCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
@@ -2116,7 +2136,12 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		var pktHash, dj, fs, obsID, obsName, pathJSON sql.NullString
 		var snr sql.NullFloat64
 		var obsTs sql.NullInt64
-		rows.Scan(&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs)
+		var scopeName sql.NullString
+		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs}
+		if db.hasScopeName {
+			scanArgs = append(scanArgs, &scopeName)
+		}
+		rows.Scan(scanArgs...)
 		if !dj.Valid {
 			continue
 		}
@@ -2167,6 +2192,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				"observers":        []string{},
 				"hops":             hops,
 				"snr":              nullFloat(snr),
+				"scope_name":       nullStr(scopeName),
 			},
 			Repeats: 1,
 		}
@@ -2465,10 +2491,14 @@ func (db *DB) scanNodeRow(rows *sql.Rows) map[string]interface{} {
 	var temperatureC sql.NullFloat64
 	var foreign sql.NullInt64
 	var defaultScope sql.NullString
+	var configuredScope, configuredScopeAt sql.NullString
 
 	scanArgs := []interface{}{&pk, &name, &role, &lat, &lon, &lastSeen, &firstSeen, &advertCount, &batteryMv, &temperatureC, &foreign}
 	if db.hasDefaultScope {
 		scanArgs = append(scanArgs, &defaultScope)
+	}
+	if db.hasConfiguredScope {
+		scanArgs = append(scanArgs, &configuredScope, &configuredScopeAt)
 	}
 	if err := rows.Scan(scanArgs...); err != nil {
 		return nil
@@ -2499,6 +2529,10 @@ func (db *DB) scanNodeRow(rows *sql.Rows) map[string]interface{} {
 	}
 	if db.hasDefaultScope {
 		m["default_scope"] = nullStr(defaultScope)
+	}
+	if db.hasConfiguredScope {
+		m["configured_scope"] = nullStr(configuredScope)
+		m["configured_scope_at"] = nullStr(configuredScopeAt)
 	}
 	return m
 }
@@ -3087,6 +3121,38 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 	}
 	if resp.TimeSeries == nil {
 		resp.TimeSeries = []ScopeTimePoint{}
+	}
+
+	// #1979: flood adverts by sender role, split by the three scope_name
+	// states. Flood routes only (TRANSPORT_FLOOD 0, FLOOD 1): zero-hop adverts
+	// go out as DIRECT/TRANSPORT_DIRECT (firmware Mesh::sendZeroHop) and are
+	// not flooded. Role is the sender's current nodes.role.
+	// The unary + on payload_type keeps the planner on the first_seen range
+	// index; the payload_type index would walk every advert ever stored.
+	roleRows, err := db.conn.Query(`
+		SELECT COALESCE(NULLIF(n.role, ''), 'unknown') AS role,
+			SUM(CASE WHEN t.scope_name IS NULL THEN 1 ELSE 0 END) AS unscoped,
+			SUM(CASE WHEN t.scope_name = '' THEN 1 ELSE 0 END) AS unknown_scope,
+			SUM(CASE WHEN t.scope_name != '' THEN 1 ELSE 0 END) AS named
+		FROM transmissions t
+		LEFT JOIN nodes n ON n.public_key = t.from_pubkey
+		WHERE +t.payload_type = ? AND t.route_type IN (0, 1) AND t.first_seen >= ?
+		GROUP BY 1
+		ORDER BY COUNT(*) DESC, 1
+	`, payloadTypeAdvert, since)
+	if err != nil {
+		return nil, fmt.Errorf("scope advertsByRole query: %w", err)
+	}
+	defer roleRows.Close()
+	resp.AdvertsByRole = []ScopeAdvertRoleCount{}
+	for roleRows.Next() {
+		var rc ScopeAdvertRoleCount
+		if roleRows.Scan(&rc.Role, &rc.Unscoped, &rc.UnknownScope, &rc.Named) == nil {
+			resp.AdvertsByRole = append(resp.AdvertsByRole, rc)
+		}
+	}
+	if err := roleRows.Err(); err != nil {
+		return nil, fmt.Errorf("scope advertsByRole iteration: %w", err)
 	}
 
 	return resp, nil

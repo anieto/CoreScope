@@ -17,7 +17,7 @@
   function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
   function statusGreen() { return cssVar('--status-green') || '#22c55e'; }
 
-  let map, ws, nodesLayer, pathsLayer, animLayer, heatLayer, geoFilterLayer, clickablePathsLayer;
+  let map, wsHandler, nodesLayer, pathsLayer, animLayer, heatLayer, geoFilterLayer, clickablePathsLayer;
   // New animation canvas
   let animCanvas, animCtx;
   let _dprMedia = null;
@@ -2773,6 +2773,7 @@
           <table style="font-size:12px;width:100%;border-collapse:collapse;">
             <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Last Seen</td><td>${lastSeen}</td></tr>
             <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Adverts</td><td>${n.advert_count || 0}</td></tr>
+            ${'configured_scope' in n && n.configured_scope !== null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;" title="Region scopes this node has configured, confirmed via an observer /neighbors report (status=responded) — concrete evidence (#1865).${n.configured_scope_at ? ' Last confirmed ' + escapeHtml(String(n.configured_scope_at)) + '.' : ''}">Configured scope <span style="color:var(--status-green-text)" role="img" aria-label="confirmed"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check"/></svg></span></td><td>${n.configured_scope === '' ? '<span style="color:var(--text-muted)">none configured</span>' : `<code style="color:var(--link-color)">${escapeHtml(n.configured_scope)}</code>`}</td></tr>` : ''}
             ${'default_scope' in n ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Scope</td><td>${n.default_scope === null ? '<span style="color:var(--text-muted)">—</span>'
   : n.default_scope === '' ? '<span style="color:var(--text-muted)">unknown scope</span>'
   : `<code style="color:var(--link-color)">${escapeHtml(n.default_scope)}</code>`
@@ -3052,7 +3053,12 @@
     if (nodeFilterKeys.length > 0) {
       if (clearBtn) clearBtn.style.display = '';
       if (countEl) { countEl.textContent = `Showing ${nodeFilterShown} of ${nodeFilterTotal}`; countEl.classList.remove('hidden'); }
-      if (input && input.value !== nodeFilterKeys.join(', ')) input.value = nodeFilterKeys.join(', ');
+      // Never overwrite the field while the user is in it: this also runs from the
+      // debounced typing handler (which commits the trimmed value) and from every
+      // matching packet, and a picked suggestion shows the name while the key is
+      // the pubkey. Compare trimmed so a stray space alone is no reason to write.
+      const userIsEditing = document.activeElement === input;
+      if (input && !userIsEditing && input.value.trim() !== nodeFilterKeys.join(', ')) input.value = nodeFilterKeys.join(', ');
     } else {
       if (clearBtn) clearBtn.style.display = 'none';
       if (countEl) countEl.classList.add('hidden');
@@ -3358,6 +3364,10 @@
 
   // Expose for testing
   window._livePruneStaleNodes = pruneStaleNodes;
+  // Exposed for the "one socket per viewer" test: the live map must reach the
+  // packet stream through app.js's shared channel and never open its own.
+  window._liveConnectWS = connectWS;
+  window._liveWSHandler = function() { return wsHandler; };
   window._liveBuildClickablePathPopupHtml = buildClickablePathPopupHtml;
   window._livePruneClickablePaths = pruneClickablePaths;
   window._liveClickablePaths = clickablePaths;
@@ -3453,17 +3463,29 @@
     } catch { }
   }
 
+  // The live map used to open its OWN WebSocket to the same endpoint that
+  // app.js already holds open on every page. Hub.Broadcast does no per-client
+  // filtering, so both sockets carried the identical full packet stream and
+  // every viewer pulled it twice. The live map is the page people leave open
+  // for hours, which made that a standing multiplier on origin bandwidth
+  // rather than a burst.
+  //
+  // It now subscribes to the shared channel (onWS/offWS in app.js), which is
+  // what every other view does. Reconnection is app.js's business: it owns the
+  // socket, and the listener registered here survives a reconnect because the
+  // listener list does.
   function connectWS() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}`);
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'packet') bufferPacket(msg.data);
-      } catch { }
+    // Re-subscribe rather than skip when a handler is already registered.
+    // Returning early here looks like the right guard against double
+    // subscription, but it keeps the PREVIOUS visit's closure registered, and
+    // that one renders into a page that no longer exists: packets keep
+    // arriving and nothing appears. Dropping the old registration first is
+    // idempotent in the same way and always binds the current page.
+    if (wsHandler) offWS(wsHandler);
+    wsHandler = (msg) => {
+      if (msg && msg.type === 'packet') bufferPacket(msg.data);
     };
-    ws.onclose = () => setTimeout(connectWS, WS_RECONNECT_MS);
-    ws.onerror = () => {};
+    onWS(wsHandler);
   }
 
   // A packet group is multibyte when its path hash size is >= 2 bytes.
@@ -4761,7 +4783,9 @@
     if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
     if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
-    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    // Unsubscribe rather than close: the socket belongs to app.js and the
+    // rest of the app still needs it.
+    if (wsHandler) { offWS(wsHandler); wsHandler = null; }
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;

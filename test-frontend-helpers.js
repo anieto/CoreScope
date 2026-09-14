@@ -6864,6 +6864,78 @@ console.log('\n=== live.js: node-filter URL update preserves lat/lon/zoom (#1709
   });
 }
 
+// ===== roles.js: hashPrefixInfo =====
+// hash_size is evidence, not a default. A node the analyzer has heard no
+// countable advert from has none — rendering that as "1" invents a 1-byte
+// config. Guards the map against regressing to `node.hash_size || 1`.
+console.log('\n=== roles.js: hashPrefixInfo ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  const hashPrefixInfo = ctx.hashPrefixInfo;
+  const PK = 'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899';
+
+  test('missing hash_size is not known', () => {
+    const r = hashPrefixInfo({ public_key: PK });
+    assert.strictEqual(r.known, false);
+  });
+
+  test('null hash_size is not known', () => {
+    assert.strictEqual(hashPrefixInfo({ public_key: PK, hash_size: null }).known, false);
+  });
+
+  test('unknown width still renders a 1-byte prefix to draw', () => {
+    const r = hashPrefixInfo({ public_key: PK, hash_size: null });
+    assert.strictEqual(r.bytes, 1);
+    assert.strictEqual(r.prefix, 'AA');
+  });
+
+  test('1-byte evidence is known', () => {
+    const r = hashPrefixInfo({ public_key: PK, hash_size: 1 });
+    assert.strictEqual(r.known, true);
+    assert.strictEqual(r.prefix, 'AA');
+  });
+
+  test('2-byte evidence widens the prefix', () => {
+    const r = hashPrefixInfo({ public_key: PK, hash_size: 2 });
+    assert.strictEqual(r.known, true);
+    assert.strictEqual(r.bytes, 2);
+    assert.strictEqual(r.prefix, 'AABB');
+  });
+
+  test('3-byte evidence widens the prefix', () => {
+    const r = hashPrefixInfo({ public_key: PK, hash_size: 3 });
+    assert.strictEqual(r.prefix, 'AABBCC');
+  });
+
+  test('hash_size 0 counts as unknown, not zero-width', () => {
+    const r = hashPrefixInfo({ public_key: PK, hash_size: 0 });
+    assert.strictEqual(r.known, false);
+    assert.strictEqual(r.prefix, 'AA');
+  });
+
+  test('missing public_key degrades to placeholder', () => {
+    assert.strictEqual(hashPrefixInfo({ hash_size: 2 }).prefix, '??');
+  });
+
+  test('null node does not throw', () => {
+    const r = hashPrefixInfo(null);
+    assert.strictEqual(r.known, false);
+    assert.strictEqual(r.prefix, '??');
+  });
+}
+
+// ===== map.js: no bare `hash_size || 1` =====
+console.log('\n=== map.js: hash size fallback ===');
+{
+  const mapSrc = fs.readFileSync(__dirname + '/public/map.js', 'utf8');
+
+  test('map.js does not default an unknown hash_size to 1', () => {
+    assert.ok(!/hash_size\s*\|\|\s*1/.test(mapSrc),
+      'map.js must go through hashPrefixInfo() — a bare `hash_size || 1` renders "unknown" as a measured 1 byte');
+  });
+}
+
 // ===== SUMMARY =====
 Promise.allSettled(pendingTests).then(() => {
   console.log(`\n${'═'.repeat(40)}`);
@@ -6933,5 +7005,511 @@ console.log('\n=== observers.js: healthStatus (configurable thresholds) ===');
     const r = runHealthStatus(null, null);
     assert.strictEqual(r.cls, 'health-red');
     assert.strictEqual(r.label, 'Unknown');
+  });
+}
+
+// ===== node-reach.js: scopeLineHtml (#1865) =====
+// The reach report states which region a node serves. Two claims that must
+// never be conflated: "Scope" is INFERRED from observed advert transport
+// scopes, "Configured scope" is CONFIRMED by reading it back off the node via
+// an observer /neighbors report. Asserting the rendered markup, not the source.
+console.log('\n=== node-reach.js: scopeLineHtml (#1865) ===');
+{
+  const ctx = makeSandbox();
+  ctx.registerPage = () => {};
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/node-reach.js');
+  const scopeLineHtml = ctx.__meshcoreReachInternals.scopeLineHtml;
+
+  test('no scope data at all renders nothing', () => {
+    assert.strictEqual(scopeLineHtml({}), '');
+  });
+
+  test('inferred-only says "Scope" and marks it observed', () => {
+    const h = scopeLineHtml({ default_scope: '#be' });
+    assert.ok(h.includes('>Scope <'), 'should label it Scope');
+    assert.ok(h.includes('#be'), 'should show the value');
+    assert.ok(h.includes('observed'), 'should mark provenance as observed');
+    assert.ok(!h.includes('nq-scope-ok'), 'inferred data must not get the confirmed tick');
+  });
+
+  test('confirmed wins over inferred and gets the tick', () => {
+    const h = scopeLineHtml({ default_scope: '#be', configured_scope: '#be,#eu' });
+    assert.ok(h.includes('Configured scope'), 'should label it Configured scope');
+    assert.ok(h.includes('nq-scope-ok'), 'confirmed data gets the tick');
+    assert.ok(h.includes('#be,#eu'), 'should show the confirmed value');
+    assert.ok(!h.includes('>Scope <'), 'must not also render the inferred line');
+  });
+
+  test('confirmed-but-empty is a statement, not missing data', () => {
+    const h = scopeLineHtml({ configured_scope: '' });
+    assert.ok(h.includes('none configured'), 'empty confirmed value must render explicitly');
+    assert.ok(h.includes('nq-scope-ok'), 'it is still a confirmation');
+  });
+
+  test('empty confirmed value does not fall back to the inferred one', () => {
+    // A node that answered "I have no scopes" must not be shown its old
+    // inferred guess instead: that would silently contradict the node.
+    const h = scopeLineHtml({ default_scope: '#be', configured_scope: '' });
+    assert.ok(h.includes('none configured'));
+    assert.ok(!h.includes('#be'), 'inferred value must not leak back in');
+  });
+
+  test('confirmation instant is carried in the title, not the visible line', () => {
+    const h = scopeLineHtml({ configured_scope: '#dk', configured_scope_at: '2026-07-26T09:43:48Z' });
+    assert.ok(h.includes('2026-07-26T09:43:48Z'), 'timestamp should be present');
+    assert.ok(h.includes('title='), 'and it should live in a title attribute');
+  });
+
+  test('scope values are HTML-escaped', () => {
+    const h = scopeLineHtml({ configured_scope: '<img src=x onerror=alert(1)>' });
+    assert.ok(!h.includes('<img'), 'must not emit raw markup from node-controlled data');
+    assert.ok(h.includes('&lt;img'), 'should be escaped instead');
+  });
+}
+
+// ===== roles.js: getEffectiveHeardMs (#1845) =====
+// Extracted from getNodeStatus so the "silent longer than N" filter measures
+// the SAME freshness the Active/Stale badge does. Two definitions is how a node
+// ends up listed as silent for 10 days while its own badge says active.
+console.log('\n=== roles.js: getEffectiveHeardMs (#1845) ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  const eff = ctx.getEffectiveHeardMs;
+  const status = ctx.getNodeStatus;
+  const iso = ms => new Date(ms).toISOString();
+  const NOW = Date.now();
+
+  test('nothing known yields NaN, not 0', () => {
+    // 0 would read as "heard at the epoch", which is a real timestamp and would
+    // silently sort/compare as very old rather than as unknown.
+    assert.ok(Number.isNaN(eff({ role: 'repeater' })));
+  });
+
+  test('non-object input yields NaN', () => {
+    assert.ok(Number.isNaN(eff(null)));
+    assert.ok(Number.isNaN(eff('repeater')));
+  });
+
+  test('precedence: _liveSeen beats every stored timestamp', () => {
+    const r = eff({ role: 'companion', _liveSeen: NOW, _lastHeard: iso(NOW - 9e6), last_seen: iso(NOW - 9e7) });
+    assert.strictEqual(r, NOW);
+  });
+
+  test('precedence: _lastHeard beats last_heard and last_seen', () => {
+    const r = eff({ role: 'companion', _lastHeard: iso(NOW - 1000), last_heard: iso(NOW - 9e6), last_seen: iso(NOW - 9e7) });
+    assert.strictEqual(r, new Date(iso(NOW - 1000)).getTime());
+  });
+
+  test('infra: a recent relay beats a stale advert', () => {
+    const r = eff({ role: 'repeater', last_seen: iso(NOW - 9e7), last_relayed: iso(NOW - 1000) });
+    assert.strictEqual(r, new Date(iso(NOW - 1000)).getTime());
+  });
+
+  test('infra: a stale relay does NOT drag a fresh advert backwards', () => {
+    const fresh = iso(NOW - 1000);
+    const r = eff({ role: 'repeater', last_seen: fresh, last_relayed: iso(NOW - 9e7) });
+    assert.strictEqual(r, new Date(fresh).getTime());
+  });
+
+  test('infra: relay alone is enough when nothing else is known', () => {
+    const r = eff({ role: 'repeater', last_relayed: iso(NOW - 1000) });
+    assert.strictEqual(r, new Date(iso(NOW - 1000)).getTime());
+  });
+
+  test('room counts as infra, companion does not', () => {
+    const relayed = iso(NOW - 1000), old = iso(NOW - 9e7);
+    assert.strictEqual(eff({ role: 'room', last_seen: old, last_relayed: relayed }), new Date(relayed).getTime());
+    // A companion is not a relay, so last_relayed on one is meaningless and
+    // must not silently rescue it.
+    assert.strictEqual(eff({ role: 'companion', last_seen: old, last_relayed: relayed }), new Date(old).getTime());
+  });
+
+  test('role matching is case-insensitive', () => {
+    const relayed = iso(NOW - 1000);
+    assert.strictEqual(eff({ role: 'Repeater', last_seen: iso(NOW - 9e7), last_relayed: relayed }), new Date(relayed).getTime());
+  });
+
+  // Regression: getNodeStatus was rewritten to call this helper. Its contract
+  // must be unchanged, including the legacy (role, ms) call shape.
+  test('getNodeStatus still honours the legacy two-argument form', () => {
+    assert.strictEqual(status('repeater', NOW), 'active');
+    assert.strictEqual(status('repeater', NOW - 4 * 86400000), 'stale');
+  });
+
+  test('getNodeStatus is still relay-aware for infra', () => {
+    assert.strictEqual(status({ role: 'repeater', last_seen: iso(NOW - 9e7), last_relayed: iso(NOW - 1000) }), 'active');
+  });
+
+  test('getNodeStatus still marks a truly silent repeater stale', () => {
+    // Past infraSilentMs (72h). 9e7 ms is only 25h, which is correctly ACTIVE
+    // for infra and would make this assertion test nothing.
+    assert.strictEqual(status({ role: 'repeater', last_seen: iso(NOW - 4 * 86400000) }), 'stale');
+  });
+
+  test('72h is the infra boundary: 71h active, 73h stale', () => {
+    assert.strictEqual(status({ role: 'repeater', last_seen: iso(NOW - 71 * 3600000) }), 'active');
+    assert.strictEqual(status({ role: 'repeater', last_seen: iso(NOW - 73 * 3600000) }), 'stale');
+  });
+
+  test('getNodeStatus treats an unknown node as stale, not active', () => {
+    assert.strictEqual(status({ role: 'repeater' }), 'stale');
+  });
+}
+
+// ===== scope-audit.js: mergedScopeChips =====
+// DECLARED and NOT OBSERVED were merged into one colour-coded Scopes column.
+// They were never independent: notObserved is a strict subset of
+// declaredRegions, so the page printed the same set twice and made the reader
+// diff it. These assert the rendered markup, not the source.
+console.log('\n=== scope-audit.js: mergedScopeChips ===');
+{
+  const ctx = makeSandbox();
+  ctx.registerPage = () => {};
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/scope-audit.js');
+  const chips = ctx.__meshcoreScopeAuditInternals.mergedScopeChips;
+  const row = (declared, notObserved) => ({ declaredRegions: declared, notObserved: notObserved });
+
+  test('a declared region absent from notObserved renders as observed', () => {
+    const h = chips(row(['be'], []));
+    assert.ok(h.includes('sa-chip-observed'), 'should carry the observed class');
+    assert.ok(!h.includes('sa-chip-unobserved'), 'and not the unobserved one');
+  });
+
+  test('a declared region present in notObserved renders as unobserved, not as an alarm', () => {
+    const h = chips(row(['be'], ['be']));
+    assert.ok(h.includes('sa-chip-unobserved'));
+    assert.ok(!h.includes('sa-chip-observed'));
+  });
+
+  test('a mixed row renders both colours, one chip per declared region', () => {
+    // The case the merge exists for: on live data a typical mixed row declares
+    // 8 regions of which 6 are unobserved, so the observed ones are the needle.
+    const h = chips(row(['be', 'eu', 'nl'], ['eu', 'nl']));
+    assert.strictEqual((h.match(/sa-chip-observed/g) || []).length, 1);
+    assert.strictEqual((h.match(/sa-chip-unobserved/g) || []).length, 2);
+    assert.strictEqual((h.match(/<span/g) || []).length, 3, 'one chip per declared region, no more');
+  });
+
+  test('declared order is preserved, not regrouped by colour', () => {
+    // Regrouping would break the operator habit of scanning for a known
+    // region in the position it always sits.
+    const h = chips(row(['be', 'eu', 'nl'], ['eu']));
+    assert.ok(h.indexOf('>be<') < h.indexOf('>eu<'), 'be before eu');
+    assert.ok(h.indexOf('>eu<') < h.indexOf('>nl<'), 'eu before nl');
+  });
+
+  test('no declared regions renders an em dash, not an empty cell', () => {
+    // 68 of 197 rows on live data declare nothing at all; an empty cell reads
+    // as a rendering fault rather than as an answer.
+    assert.ok(chips(row([], [])).includes('—'));
+  });
+
+  test('every chip explains its own colour in a title', () => {
+    const h = chips(row(['be', 'eu'], ['eu']));
+    assert.ok(h.includes('observed forwarding in this window'));
+    assert.ok(h.includes('declared, but no forwarding observed in this window'));
+  });
+
+  test('region names are HTML-escaped', () => {
+    const h = chips(row(['<img src=x onerror=alert(1)>'], []));
+    assert.ok(!h.includes('<img'), 'must not emit raw markup from server-supplied names');
+    assert.ok(h.includes('&lt;img'));
+  });
+
+  test('a region verified against the repeater own declaration is green, and says so', () => {
+    const h = chips({ declaredRegions: ['fm-112'], notObserved: [], regionEvidence: { 'fm-112': 23 } });
+    assert.ok(h.includes('sa-chip-observed'), 'still green — it is observed');
+    assert.ok(h.includes('sa-chip-verified'), 'but marked as established differently');
+    assert.ok(h.includes('23'), 'the tooltip states how much evidence there is');
+  });
+
+  test('a region observed by name carries no verified marker', () => {
+    const h = chips({ declaredRegions: ['be'], notObserved: [], regionEvidence: {} });
+    assert.ok(h.includes('sa-chip-observed'));
+    assert.ok(!h.includes('sa-chip-verified'), 'a normally-named region is not a verification');
+  });
+
+  test('a single-hit region stays grey and its tooltip explains why', () => {
+    const h = chips({ declaredRegions: ['fm-112'], notObserved: ['fm-112'], regionEvidence: { 'fm-112': 1 } });
+    assert.ok(h.includes('sa-chip-unobserved'), 'one hit is not enough to turn it green');
+    assert.ok(/one match/i.test(h), 'must say why one hit was not accepted');
+  });
+
+  test('a missing regionEvidence field renders as before (older server)', () => {
+    const h = chips({ declaredRegions: ['be'], notObserved: ['be'] });
+    assert.ok(h.includes('sa-chip-unobserved'));
+    assert.ok(!h.includes('sa-chip-verified'));
+  });
+
+  test('a notObserved entry that is not declared cannot invent a chip', () => {
+    // Defensive: the server guarantees notObserved is a subset (197 of 197
+    // rows checked), but the column must not grow a phantom chip if that ever
+    // stops holding.
+    const h = chips(row(['be'], ['be', 'ghost']));
+    assert.strictEqual((h.match(/<span/g) || []).length, 1);
+    assert.ok(!h.includes('ghost'));
+  });
+}
+
+// ===== scope-audit.js: unmatchedCaveat =====
+// A declared region this instance holds no hashRegions key for can never turn
+// green, however much traffic the repeater forwards: the ingestor stores such
+// packets with an empty scope_name, so there is no name for the audit to match
+// the declaration against. On live data that explains a large share of all
+// notObserved entries, so the column must be able to say so instead of
+// presenting every grey chip as a confirmed gap.
+console.log('\n=== scope-audit.js: unmatchedCaveat ===');
+{
+  const ctx = makeSandbox();
+  ctx.registerPage = () => {};
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/scope-audit.js');
+  const caveat = ctx.__meshcoreScopeAuditInternals.unmatchedCaveat;
+
+  test('zero unmatched packets renders nothing at all', () => {
+    assert.strictEqual(caveat({ observedUnmatchedPackets: 0 }), '');
+  });
+
+  test('a missing field renders nothing (older server, field absent)', () => {
+    assert.strictEqual(caveat({}), '');
+  });
+
+  test('a non-zero unexplained count renders a chip carrying the number', () => {
+    const h = caveat({ observedUnmatchedPackets: 148 });
+    assert.ok(h.includes('sa-chip-unmatched'), 'should carry its own class');
+    assert.ok(h.includes('148'), 'with no evidence to subtract, the whole count is unexplained');
+    assert.ok(h.includes('unexplained'), 'the word changed with the meaning');
+  });
+
+  test('singular and plural are both grammatical', () => {
+    assert.ok(caveat({ observedUnmatchedPackets: 1 }).includes('1 forwarded packet '));
+    assert.ok(caveat({ observedUnmatchedPackets: 2 }).includes('2 forwarded packets '));
+  });
+
+  test('the title says what unexplained traffic implies', () => {
+    // The cause is no longer only a hashRegions gap: after verification, what
+    // is left over is traffic for a region the repeater does not declare.
+    const h = caveat({ observedUnmatchedPackets: 5 });
+    assert.ok(/does not declare/i.test(h), 'must state the sharper conclusion');
+  });
+
+  test('traffic fully explained by verification raises no caveat', () => {
+    assert.strictEqual(caveat({ observedUnmatchedPackets: 23, regionEvidence: { 'fm-112': 23 } }), '');
+  });
+
+  test('only the unexplained remainder is reported', () => {
+    const h = caveat({ observedUnmatchedPackets: 30, regionEvidence: { 'fm-112': 23 } });
+    assert.ok(h.includes('7 forwarded packets '), 'want the remainder, not the total');
+  });
+
+  test('evidence the server refused to count is not subtracted either', () => {
+    // A region with a single deriving packet stays in notObserved on purpose:
+    // one match in 65536 is chance, not evidence (scopeVerifyMinCorroboration).
+    // Subtracting it here would call that packet explained while the chip
+    // beside it says the opposite. Keyed on notObserved rather than on the
+    // number, so the threshold lives in one place: the server.
+    const h = caveat({
+      observedUnmatchedPackets: 3,
+      regionEvidence: { 'fm-112': 1 },
+      notObserved: ['fm-112'],
+    });
+    assert.ok(h.includes('3 forwarded packets '), 'all three are still unexplained');
+  });
+
+  test('evidence that did establish a region is still subtracted', () => {
+    const h = caveat({
+      observedUnmatchedPackets: 10,
+      regionEvidence: { 'nl-nb': 3, belml: 1 },
+      notObserved: ['belml'],
+    });
+    assert.ok(h.includes('7 forwarded packets '), 'subtract the verified 3, keep the uncorroborated 1');
+  });
+
+  test('a sampled count is reported as an upper bound', () => {
+    // observedUnmatchedPackets counts every packet; the evidence can only come
+    // from the packets the verifier actually held. Subtracting an undercounted
+    // number from a complete one overstates what is unexplained, so the chip
+    // says at most rather than pretending to an exact figure.
+    const h = caveat({
+      observedUnmatchedPackets: 900,
+      observedUnmatchedSampled: 512,
+      regionEvidence: { 'nl-nb': 40 },
+    });
+    assert.ok(h.includes('at most 860 forwarded packets '), 'want the bound, stated as one');
+  });
+
+  test('an unsampled count keeps its exact wording', () => {
+    const h = caveat({
+      observedUnmatchedPackets: 30,
+      observedUnmatchedSampled: 30,
+      regionEvidence: { 'fm-112': 23 },
+    });
+    assert.ok(h.includes('7 forwarded packets '), 'exact remainder');
+    assert.ok(!/at most/.test(h), 'nothing was sampled away, so do not hedge');
+  });
+
+  test('a non-numeric count renders nothing rather than NaN', () => {
+    assert.strictEqual(caveat({ observedUnmatchedPackets: '12' }), '');
+    assert.strictEqual(caveat({ observedUnmatchedPackets: NaN }), '');
+  });
+
+  test('evidence exceeding the count cannot produce a negative remainder', () => {
+    // One packet can derive to two of a repeater's declared regions, so the
+    // evidence values can sum past the number of distinct packets.
+    assert.strictEqual(caveat({ observedUnmatchedPackets: 4, regionEvidence: { a: 3, b: 3 } }), '');
+  });
+
+  test('the count is not injected raw into markup', () => {
+    // observedUnmatchedPackets is server-supplied. It is a number in every
+    // sane response, but the chip must not become an injection point if that
+    // ever stops holding.
+    const h = caveat({ observedUnmatchedPackets: '1"><script>alert(1)</script>' });
+    assert.ok(!h.includes('<script'), 'must not emit raw markup from a server-supplied value');
+  });
+}
+
+// The empty state is what a stock install sees: neither collector ships with
+// CoreScope, so most deployments open this page and find nothing. It therefore
+// has to explain where the data comes from, not just report its absence.
+console.log('\n=== scope-audit.js: emptyStateHtml ===');
+{
+  const ctx = makeSandbox();
+  ctx.registerPage = () => {};
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/scope-audit.js');
+  const empty = ctx.__meshcoreScopeAuditInternals.emptyStateHtml();
+
+  test('names both collectors', () => {
+    assert.ok(/neighbour-report firmware/i.test(empty), 'should name the observer firmware');
+    assert.ok(/CoreDrive RX/i.test(empty), 'should name the companion app');
+  });
+
+  test('links to both so the reader can act on it', () => {
+    assert.ok(empty.includes('observer.gessaman.com'), 'observer firmware link');
+    // Upstream links the repo; a fork may link its own hosted instance.
+    assert.ok(/rx\.on8ar\.eu|coredrive-rx/.test(empty), 'companion app link');
+  });
+
+  test('says an empty table is normal, not a fault', () => {
+    assert.ok(/normal state/i.test(empty));
+  });
+
+  test('states the precedence rule, so two collectors are not confusing', () => {
+    assert.ok(/newest answer per repeater wins/i.test(empty));
+  });
+
+  test('says what nothing else in CoreScope can tell you', () => {
+    // The reason the page exists at all: observed traffic shows which scopes a
+    // node carried, never which it is configured for.
+    assert.ok(/configured/i.test(empty) && /traffic was seen under/i.test(empty));
+  });
+
+  test('does not use the old drive-around wording', () => {
+    // "fills in as devices drive" was CoreDrive-specific jargon that meant
+    // nothing to an operator running the observer firmware instead.
+    assert.ok(!/as devices drive/i.test(empty));
+  });
+}
+
+// The always-visible provenance line. It must carry the links itself: the
+// fuller explanation lives in the empty state, which never renders on an
+// instance that HAS data, so an operator with a full table would otherwise
+// never learn where the declared column came from. That was the actual bug.
+console.log('\n=== scope-audit.js: sourcesLineHtml ===');
+{
+  const ctx = makeSandbox();
+  ctx.registerPage = () => {};
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/scope-audit.js');
+  const line = ctx.__meshcoreScopeAuditInternals.sourcesLineHtml();
+
+  test('carries a link for each collector, not just their names', () => {
+    assert.strictEqual((line.match(/<a /g) || []).length, 2, 'both collectors must be linked');
+    assert.ok(line.includes('observer.gessaman.com'), 'observer firmware link');
+    assert.ok(/rx\.on8ar\.eu|coredrive-rx/.test(line), 'companion app link');
+  });
+
+  test('external links are safe to open', () => {
+    assert.strictEqual((line.match(/rel="noopener"/g) || []).length, 2);
+  });
+
+  test('separates the two claims the page rests on', () => {
+    assert.ok(/declared/i.test(line) && /observed/i.test(line));
+    assert.ok(/read back off the node/i.test(line), 'declared is the node answering');
+    assert.ok(/already sees in its own traffic/i.test(line), 'observed is our own data');
+  });
+
+  test('states the precedence rule where a reader with data will see it', () => {
+    assert.ok(/newest answer per repeater wins/i.test(line));
+  });
+}
+
+// ===== live.js: one WebSocket per viewer =====
+// app.js opens a socket on every page load and fans messages out through
+// onWS()/offWS(). live.js used to ignore that and open a second socket to the
+// same endpoint, and since the broadcast does no per-client filtering, both
+// carried the identical full packet stream. The live map is the page people
+// leave open for hours, so it doubled origin bandwidth for as long as the tab
+// was open.
+console.log('\n=== live.js: one WebSocket per viewer ===');
+{
+  function makeWSSandbox() {
+    const ctx = makeSandbox();
+    ctx.registerPage = () => {};
+    let constructed = 0;
+    const registered = [];
+    ctx.WebSocket = function () { constructed++; };
+    ctx.onWS = (fn) => registered.push(fn);
+    ctx.offWS = (fn) => {
+      const i = registered.indexOf(fn);
+      if (i >= 0) registered.splice(i, 1);
+    };
+    ctx.L = { map: () => ({ setView: () => ({}), on: () => {}, remove: () => {} }) };
+    ctx.IATA_COORDS_GEO = {};
+    ctx.cancelAnimationFrame = () => {};
+    ctx.document.createElementNS = () => ctx.document.createElement();
+    loadInCtx(ctx, 'public/roles.js');
+    try {
+      loadInCtx(ctx, 'public/live.js');
+    } catch (e) {
+      for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
+    }
+    return { ctx, registered, constructedCount: () => constructed };
+  }
+
+  test('the live map subscribes to the shared channel instead of opening a socket', () => {
+    const { ctx, registered, constructedCount } = makeWSSandbox();
+    const connect = ctx.window._liveConnectWS;
+    assert.ok(connect, '_liveConnectWS must be exposed');
+    connect();
+    assert.strictEqual(constructedCount(), 0, 'live.js must not construct a WebSocket of its own');
+    assert.strictEqual(registered.length, 1, 'it must register exactly one listener on the shared channel');
+  });
+
+  test('re-entering the page keeps one listener, and it is the current one', () => {
+    // Navigating away and back re-runs the page init. Two failure modes sit
+    // either side of this: registering again without dropping the old one
+    // doubles every packet, and skipping the registration leaves the previous
+    // visit's closure subscribed, which renders into a page that is gone. That
+    // second one is not theoretical: it was measured against a running
+    // instance, where packets kept arriving and the live counter stayed at 0.
+    const { ctx, registered } = makeWSSandbox();
+    ctx.window._liveConnectWS();
+    const first = registered[0];
+    ctx.window._liveConnectWS();
+    assert.strictEqual(registered.length, 1, 'exactly one listener must remain');
+    assert.notStrictEqual(registered[0], first, 'and it must be the new one, bound to the current page');
+  });
+
+  test('the handler only reacts to packet messages', () => {
+    const { ctx, registered } = makeWSSandbox();
+    ctx.window._liveConnectWS();
+    const handler = registered[0];
+    // Neither of these carries packet data; the handler must not throw on them.
+    assert.doesNotThrow(() => handler({ type: 'stats' }));
+    assert.doesNotThrow(() => handler(null));
   });
 }

@@ -159,6 +159,13 @@ func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error)
 		return nil, fmt.Errorf("preparing statements: %w", err)
 	}
 
+	// Continue the scope-match tally from where the previous process left
+	// off. Not fatal: a tally that cannot be read costs an observability
+	// number, and refusing to ingest over it would be the worse trade.
+	if err := s.LoadScopeMatchTotals(); err != nil {
+		log.Printf("[regions] restoring scope-match tally: %v", err)
+	}
+
 	// Schedule async migrations. These must NOT block boot. See
 	// async_migration.go for the convention.
 	// PREFLIGHT: async=true reason="composite index build on observations (1.9M+ rows in prod) — converted from sync after v3.8.3"
@@ -226,6 +233,16 @@ func applySchema(db *sql.DB) error {
 			battery_mv INTEGER,
 			temperature_c REAL,
 			foreign_advert INTEGER DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS scope_match_totals (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			since_unix INTEGER NOT NULL,
+			unique_matches INTEGER NOT NULL,
+			explicit_over_derived INTEGER NOT NULL,
+			ambiguous INTEGER NOT NULL,
+			none_matches INTEGER NOT NULL,
+			updated_unix INTEGER NOT NULL
 		);
 
 		CREATE TABLE IF NOT EXISTS observers (
@@ -1581,9 +1598,11 @@ func (s *Store) BackfillPathJSONAsync() {
 // MQTT packet inserts and any concurrent backfill goroutines — serialize through
 // the single connection pool. busy_timeout(5000) handles transient cross-process
 // contention with the read-only server process. No additional locking is needed.
-func (s *Store) BackfillDefaultScopeAsync(regionKeys map[string][]byte) {
-	// No region keys configured — all scope_name values will be NULL, nothing to backfill.
-	if len(regionKeys) == 0 {
+func (s *Store) BackfillDefaultScopeAsync(regionSet *regionKeySet) {
+	// No region keys at all — every scope_name is NULL, nothing to backfill.
+	// The emptiness gate is read once here rather than per row: the loop below
+	// uses no keys, it only copies names that are already stored.
+	if len(regionSet.snapshot().all) == 0 {
 		return
 	}
 	s.backfillWg.Add(1)
@@ -2044,6 +2063,109 @@ func (s *Store) UpdateNodeDefaultScope(pubkey, scope string) error {
 	return err
 }
 
+// normalizeReportTS parses an observer report timestamp and returns it in
+// canonical UTC RFC3339 form ("2006-01-02T15:04:05Z"). It accepts both the
+// firmware's fractional/offset form (e.g. "2026-07-26T09:43:48.000000+00:00")
+// and plain "Z"/offset variants. An empty or unparseable input returns "" so
+// the caller writes an empty configured_scope_at and skips the ordering guard;
+// this keeps every stored timestamp either canonical or empty, never a mix of
+// offset/precision formats that would break lexicographic last-write-wins.
+func normalizeReportTS(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
+}
+
+// normalizeScopeList canonicalises the comma-separated region-scope string an
+// observer reports for a node, so configured_scope is directly comparable with
+// default_scope instead of only looking similar (#1865, raised by @cwichura).
+//
+// The OTA scope query returns bare region names ("dk,eu,dk-aarhus"), while
+// everything else in CoreScope carries the leading "#": every stored
+// default_scope value on a live 1425-node instance starts with one (361 of
+// 361), and the hashRegions/hashChannels config paths already prefix a missing
+// "#" before deriving the channel key from it (main.go). The "#" is therefore
+// part of the region's name here, not decoration, so a bare "dk" and a stored
+// "#dk" are the same region and must be written the same way.
+//
+// Rules, in order: entries are trimmed; empty entries are dropped; "*" is a
+// wildcard rather than a region name and is passed through untouched; anything
+// else gains a leading "#" if it lacks one. Order is preserved and duplicates
+// are NOT collapsed, because the observer's ordering carries meaning we do not
+// interpret here. Case is left alone: region keys are derived as
+// sha256("#name"), so folding case would silently retarget a scope.
+//
+// An empty or all-empty input returns "", which UpdateNodeConfiguredScope
+// stores as a valid "responded, no scopes configured" statement.
+func normalizeScopeList(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if p != "*" && !strings.HasPrefix(p, "#") {
+			p = "#" + p
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, ",")
+}
+
+// UpdateNodeConfiguredScope records the region scopes a node has CONFIGURED,
+// as concrete evidence from an observer /neighbors report (#1865). Unlike
+// UpdateNodeDefaultScope (inferred, overwritten on every observation), this is
+// only called for the observer's own `self` scopes and for neighbors whose OTA
+// scope query returned status="responded" — so the caller, not this method,
+// gates on status. An empty scope IS a valid "responded, no scopes configured"
+// statement and is stored; a timeout must simply not reach this method.
+//
+// reportedAt is the report envelope timestamp (ISO-8601). It is stored in
+// configured_scope_at and used for last-write-wins: an out-of-order older
+// report must not clobber a newer confirmed value. A blank reportedAt skips
+// the ordering guard (always writes).
+func (s *Store) UpdateNodeConfiguredScope(pubkey, scope, reportedAt string) error {
+	if pubkey == "" {
+		return nil
+	}
+	// Normalize to canonical UTC RFC3339 so the last-write-wins comparison is
+	// chronological, not lexicographic (see normalizeReportTS). Stored values
+	// are therefore always canonical or empty.
+	reportedAt = normalizeReportTS(reportedAt)
+	// Canonicalise the scope syntax for the same reason: a value that is stored
+	// differently from default_scope cannot be compared against it (see
+	// normalizeScopeList).
+	scope = normalizeScopeList(scope)
+	// Last-write-wins: skip if the stored confirmation is newer-or-equal.
+	if reportedAt != "" {
+		var curAt sql.NullString
+		row := s.db.QueryRow(`SELECT configured_scope_at FROM nodes WHERE public_key = ?`, pubkey)
+		if row.Scan(&curAt) == nil && curAt.Valid && curAt.String != "" && curAt.String >= reportedAt {
+			return nil
+		}
+	}
+	if _, err := s.db.Exec(
+		`UPDATE nodes SET configured_scope = ?, configured_scope_at = ? WHERE public_key = ?`,
+		scope, reportedAt, pubkey); err != nil {
+		return err
+	}
+	// Mirror to inactive_nodes (node may be there if recently moved by retention).
+	_, err := s.db.Exec(
+		`UPDATE inactive_nodes SET configured_scope = ?, configured_scope_at = ? WHERE public_key = ?`,
+		scope, reportedAt, pubkey)
+	return err
+}
+
 // RecordNaiveSkew is called when resolveRxTime() clamps a packet's envelope
 // timestamp because the observer is emitting a zone-less local-time string
 // off from UTC by more than 15 min (issue #1478). Stamps the observer's
@@ -2104,7 +2226,7 @@ type MQTTPacketMessage struct {
 // into the past. Packet ordering is owned by the server clock; client
 // clocks are untrusted. msg.Timestamp still flows into observer.last_seen
 // via UpsertObserverAt — that's #1233's MAX/MIN guarded path and is fine.
-func BuildPacketData(msg *MQTTPacketMessage, decoded *DecodedPacket, observerID, region string, regionKeys map[string][]byte) *PacketData {
+func BuildPacketData(msg *MQTTPacketMessage, decoded *DecodedPacket, observerID, region string, regionSet *regionKeySet) *PacketData {
 	pathJSON := "[]"
 	// For TRACE packets, path_json must be the payload-decoded route hops
 	// (decoded.Path.Hops), NOT the raw_hex header bytes which are SNR values.
@@ -2157,7 +2279,7 @@ func BuildPacketData(msg *MQTTPacketMessage, decoded *DecodedPacket, observerID,
 		pd.Code2 = decoded.TransportCodes.Code2
 		if decoded.TransportCodes.Code1 != "0000" {
 			pd.IsTransportScoped = true
-			pd.ScopeName = matchScope(regionKeys, byte(decoded.Header.PayloadType), decoded.payloadRaw, decoded.TransportCodes.Code1)
+			pd.ScopeName = regionSet.matchScopeName(byte(decoded.Header.PayloadType), decoded.payloadRaw, decoded.TransportCodes.Code1)
 		}
 	}
 
