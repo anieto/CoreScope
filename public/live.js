@@ -39,6 +39,15 @@
   const CLICKABLE_POPUP_DISMISS_MS = 20000;
   let nodeMarkers = {};
   let nodeData = {};
+  // Region-independent coordinate cache for recenterMapToRegion's own
+  // classification — deliberately NOT scoped by the active region filter,
+  // since recenter needs every node's position to classify by nearest
+  // centroid regardless of what's currently selected. Kept separate from
+  // nodeData, which loadNodes() clears/repopulates scoped to the current
+  // region filter for marker visibility (#1108) — reusing that for
+  // recenter would mean recentering against the PREVIOUS region's nodes
+  // while the new region's fetch is still in flight.
+  let allNodeCoords = {};
   let packetCount = 0;
   let activeAnims = 0;
   const MAX_CONCURRENT_ANIMS = 20;
@@ -1851,8 +1860,8 @@
       var selectedSet = {};
       for (var i = 0; i < selected.length; i++) selectedSet[String(selected[i]).toUpperCase()] = true;
       var pts = [];
-      for (var key in nodeData) {
-        var n = nodeData[key];
+      for (var key in allNodeCoords) {
+        var n = allNodeCoords[key];
         if (n && n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0)) {
           var region = nearestRegionCode(n.lat, n.lon);
           if (region && selectedSet[region]) pts.push([n.lat, n.lon]);
@@ -1862,6 +1871,30 @@
       try {
         map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 12 });
       } catch (e) {}
+    }
+
+    // Populates allNodeCoords for recenterMapToRegion — deliberately
+    // unscoped by the active region filter (no &region= param) and
+    // deliberately lightweight (&fields=coords skips the server's
+    // relay/usefulness/bridge/coverage/redundancy/declared-region
+    // enrichment entirely, see cmd/server/routes.go handleNodes) since
+    // only lat/lon are used here. Refreshed periodically rather than on
+    // every region change — node positions are a slow-moving signal.
+    async function loadAllNodeCoords() {
+      try {
+        const { nodes: list } = await fetchAllNodes('&fields=coords', {
+          safetyCap: window.LIVE_MAP_MAX_NODES || 10000,
+        });
+        var next = {};
+        list.forEach(function(n) {
+          if (n && n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0)) {
+            next[n.public_key] = { lat: n.lat, lon: n.lon };
+          }
+        });
+        allNodeCoords = next;
+      } catch (e) {
+        console.warn('[live] loadAllNodeCoords failed', e);
+      }
     }
 
     // Region filter (#1045): dropdown of observer IATA regions
@@ -1877,22 +1910,31 @@
         setObserverIataMap(buildObserverIataMap(data));
       }).catch(function() { /* leave map empty; filter will hide all when active */ });
       RegionFilter.init(rfEl, { dropdown: true });
+      // Prime the coordinate cache immediately, then keep it fresh — same
+      // 5-minute cadence as the other slow-moving background recomputers
+      // (bridge/coverage/redundancy scores) on the server side.
+      loadAllNodeCoords();
+      setInterval(loadAllNodeCoords, 5 * 60 * 1000);
       regionFilterChangeHandler = RegionFilter.onChange(async function(selected) {
+        // Recenter no longer waits on the region-scoped /api/nodes reload
+        // below — it only needs allNodeCoords, which is independent of the
+        // active region filter (see loadAllNodeCoords). This also means a
+        // slow/aborted marker reload can no longer silently prevent the
+        // camera from moving, which is what made this feature look broken
+        // (#region-perf).
+        recenterMapToRegion(selected);
         // #1108 — when the region selection changes, reload visible map
         // nodes so non-region nodes disappear (or reappear) immediately.
         // The packet feed already filters live via packetMatchesRegion.
         try {
           await loadNodes();
-          recenterMapToRegion(selected);
         } catch (e) {
           // Was previously silent (comment: "loadNodes not yet defined
           // during init order edge cases"), which also hid real failures
-          // of the region-filtered /api/nodes fetch (e.g. slow query
-          // timeout/abort) — recenter would then silently no-op with no
-          // visible sign anything went wrong. Log instead so a slow/failed
-          // fetch is at least visible; the init-order case is harmless to
-          // log too.
-          console.warn('[live] region change: loadNodes/recenter failed', e);
+          // of the region-filtered /api/nodes fetch. Log instead so a
+          // slow/failed fetch is at least visible; the init-order case is
+          // harmless to log too.
+          console.warn('[live] region change: loadNodes failed', e);
         }
       });
       // #1108 — "Show all nodes (faded)" sub-toggle, sibling to the region

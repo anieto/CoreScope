@@ -1301,7 +1301,12 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	if s.store != nil {
+	// Perf: callers that only need coordinates (e.g. the live map's
+	// region-recenter fitBounds) pay for none of the per-node enrichment
+	// below — relay/usefulness/bridge/coverage/redundancy scores and
+	// declared-region lookups are real work skipped entirely when unused.
+	lite := q.Get("fields") == "coords"
+	if s.store != nil && !lite {
 		hashInfo := s.store.GetNodeHashSizeInfo()
 		relayWindow := s.cfg.GetHealthThresholds().RelayActiveHours
 		// #1257: bulk-compute relay info + usefulness scores ONCE per

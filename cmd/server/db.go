@@ -15,6 +15,7 @@ import (
 
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/geofilter"
+	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,6 +63,21 @@ type DB struct {
 	msgCacheMu sync.Mutex
 	msgCache   map[string]channelMessagesCacheEntry
 
+	// Region membership cache (perf): pubkey -> set of IATA codes it has
+	// been observed transmitting ADVERT packets from. GetNodes previously
+	// ran a live JOIN across transmissions/observations/observers per
+	// request, filtered to the requested codes — cheap-looking but a full
+	// scan of the join regardless of selectivity, repeated for every
+	// distinct region combination a client requested (observed 9-17s on
+	// a modest dataset). Computed once per TTL window covering every
+	// region, so a request becomes a map lookup instead of a fresh scan.
+	regionMembershipMu    sync.Mutex
+	regionMembershipCache map[string]map[string]bool
+	regionMembershipAt    time.Time
+	// Collapses the TTL-boundary herd so the scan runs once, not once per
+	// in-flight request, and never under regionMembershipMu.
+	regionMembershipSF singleflight.Group
+
 	// Prepared statements for frequently-called queries.
 	// Prepared once at initDB time, reused across all requests.
 	stmtCountTransmissions  *sql.Stmt
@@ -91,6 +107,11 @@ const msgCacheTTL = 10 * time.Second
 // maxCacheEntries bounds a keyed cache's size. Region/pagination keys are
 // low-cardinality in practice; this is a defensive reset, not a real LRU.
 const maxCacheEntries = 256
+
+// regionMembershipTTL matches declaredRegionsTTL's cadence (scope_config_state.go)
+// — region membership from ADVERT history is a slow-moving signal, not a
+// real-time one.
+const regionMembershipTTL = 30 * time.Second
 
 type channelsCacheEntry struct {
 	res []map[string]interface{}
@@ -1020,6 +1041,84 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 	return obsByTx[txID]
 }
 
+// regionMembership returns the cached pubkey -> observed-IATA-code-set map,
+// recomputing it via a single full scan on a TTL miss. Concurrent misses
+// are collapsed by singleflight so the scan runs once, not once per
+// in-flight request (same idiom as declaredRegionsCSV, scope_config_state.go).
+func (db *DB) regionMembership() (map[string]map[string]bool, error) {
+	db.regionMembershipMu.Lock()
+	cached, at := db.regionMembershipCache, db.regionMembershipAt
+	db.regionMembershipMu.Unlock()
+	if cached != nil && time.Since(at) < regionMembershipTTL {
+		return cached, nil
+	}
+
+	v, err, _ := db.regionMembershipSF.Do("region-membership", func() (interface{}, error) {
+		// Double-check inside the flight: a previous winner may have stored a
+		// fresh map between this caller's read above and its arrival here.
+		db.regionMembershipMu.Lock()
+		fresh, freshAt := db.regionMembershipCache, db.regionMembershipAt
+		db.regionMembershipMu.Unlock()
+		if fresh != nil && time.Since(freshAt) < regionMembershipTTL {
+			return fresh, nil
+		}
+
+		m, qerr := db.allRegionMemberships()
+		if qerr != nil {
+			return nil, qerr
+		}
+		db.regionMembershipMu.Lock()
+		db.regionMembershipCache = m
+		db.regionMembershipAt = time.Now()
+		db.regionMembershipMu.Unlock()
+		return m, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(map[string]map[string]bool), nil
+}
+
+// allRegionMemberships runs the pubkey -> observed-IATA-codes scan once,
+// covering every region in a single pass rather than the previous
+// per-request query which re-ran the same JOIN filtered to only the
+// requested codes — a full scan of the join regardless of selectivity.
+// Pubkey casing matches from_pubkey exactly as stored (#1143), consistent
+// with the direct `public_key IN (SELECT ... from_pubkey)` equality the
+// old inline subquery relied on.
+func (db *DB) allRegionMemberships() (map[string]map[string]bool, error) {
+	joinCond := "obs.rowid = o.observer_idx"
+	if !db.isV3 {
+		joinCond = "obs.id = o.observer_id"
+	}
+	query := fmt.Sprintf(`
+		SELECT DISTINCT t.from_pubkey, UPPER(TRIM(obs.iata))
+		FROM transmissions t
+		JOIN observations o ON o.transmission_id = t.id
+		JOIN observers obs ON %s
+		WHERE t.payload_type = 4
+		AND obs.iata IS NOT NULL AND TRIM(obs.iata) != ''
+	`, joinCond)
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]map[string]bool)
+	for rows.Next() {
+		var pubkey, iata string
+		if err := rows.Scan(&pubkey, &iata); err != nil {
+			continue
+		}
+		if out[pubkey] == nil {
+			out[pubkey] = make(map[string]bool)
+		}
+		out[pubkey][iata] = true
+	}
+	return out, rows.Err()
+}
+
 // GetNodes returns filtered, paginated node list.
 func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortBy, region string) ([]map[string]interface{}, int, map[string]int, error) {
 	var where []string
@@ -1052,29 +1151,40 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 	if region != "" {
 		codes := normalizeRegionCodes(region)
 		if len(codes) > 0 {
-			placeholders := make([]string, len(codes))
-			regionArgs := make([]interface{}, len(codes))
-			for i, c := range codes {
-				placeholders[i] = "?"
-				regionArgs[i] = c
+			// Perf: was a live JOIN across transmissions/observations/observers
+			// per request (observed 9-17s under real load) — now a lookup
+			// against a periodically-refreshed snapshot. See regionMembership.
+			membership, mErr := db.regionMembership()
+			if mErr != nil {
+				log.Printf("[nodes] region membership lookup failed, region filter matches nothing: %v", mErr)
+				where = append(where, "1 = 0")
+			} else {
+				codeSet := make(map[string]bool, len(codes))
+				for _, c := range codes {
+					codeSet[c] = true
+				}
+				var pubkeys []string
+				for pk, regions := range membership {
+					for r := range regions {
+						if codeSet[r] {
+							pubkeys = append(pubkeys, pk)
+							break
+						}
+					}
+				}
+				if len(pubkeys) == 0 {
+					where = append(where, "1 = 0")
+				} else {
+					placeholders := make([]string, len(pubkeys))
+					pkArgs := make([]interface{}, len(pubkeys))
+					for i, pk := range pubkeys {
+						placeholders[i] = "?"
+						pkArgs[i] = pk
+					}
+					where = append(where, fmt.Sprintf("public_key IN (%s)", strings.Join(placeholders, ",")))
+					args = append(args, pkArgs...)
+				}
 			}
-			joinCond := "obs.rowid = o.observer_idx"
-			if !db.isV3 {
-				joinCond = "obs.id = o.observer_id"
-			}
-			// #1143: from_pubkey is a dedicated, indexed column populated at
-			// ingest (and backfilled) for ADVERT rows specifically so pubkey
-			// lookups don't need to JSON_EXTRACT + parse decoded_json per row.
-			subq := fmt.Sprintf(`public_key IN (
-				SELECT DISTINCT t.from_pubkey
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				JOIN observers obs ON %s
-				WHERE t.payload_type = 4
-				AND UPPER(TRIM(obs.iata)) IN (%s)
-			)`, joinCond, strings.Join(placeholders, ","))
-			where = append(where, subq)
-			args = append(args, regionArgs...)
 		}
 	}
 
