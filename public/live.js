@@ -1884,7 +1884,16 @@
         try {
           await loadNodes();
           recenterMapToRegion(selected);
-        } catch (e) { /* loadNodes not yet defined during init order edge cases */ }
+        } catch (e) {
+          // Was previously silent (comment: "loadNodes not yet defined
+          // during init order edge cases"), which also hid real failures
+          // of the region-filtered /api/nodes fetch (e.g. slow query
+          // timeout/abort) — recenter would then silently no-op with no
+          // visible sign anything went wrong. Log instead so a slow/failed
+          // fetch is at least visible; the init-order case is harmless to
+          // log too.
+          console.warn('[live] region change: loadNodes/recenter failed', e);
+        }
       });
       // #1108 — "Show all nodes (faded)" sub-toggle, sibling to the region
       // dropdown. Off by default = hide non-region nodes; on = legacy

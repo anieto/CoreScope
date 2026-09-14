@@ -110,8 +110,14 @@ func OpenDB(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn.SetMaxOpenConns(4)
-	conn.SetMaxIdleConns(2)
+	// MeshTexas: raised from 4/2 — the upstream sync (2026-09-14) added several
+	// 5m-interval background recomputes (scope-audit, node-hop-analytics,
+	// bridge/coverage/redundancy) that now share this pool with request
+	// traffic. This connection is read-only WAL, so more concurrent readers
+	// is safe; 4 was starving region-filtered /api/nodes queries under the
+	// added contention.
+	conn.SetMaxOpenConns(16)
+	conn.SetMaxIdleConns(8)
 	if err := conn.Ping(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("ping failed: %w", err)
