@@ -1830,6 +1830,27 @@
       return best;
     }
 
+    // Texas's real geographic extent, used only to frame the "All Regions"
+    // view — deliberately NOT derived from REGION_CENTROIDS. Several of
+    // those (ELP, AMA, TXK, MFE) sit right at the state's edges, so fitting
+    // to their union overshot into New Mexico/Oklahoma/Louisiana/Mexico.
+    var TEXAS_BOUNDS = [[25.6, -106.8], [36.6, -93.4]];
+
+    // Caps how far a node can sit from its OWN classified region's centroid
+    // and still steer the camera for that region. Without this, a node
+    // correctly classified as (say) SAT by nearest-centroid but genuinely
+    // far out — e.g. a Hill Country repeater ~65mi northwest of San
+    // Antonio, only marginally closer to SAT than to AUS — widened the
+    // fitBounds rectangle enough that Austin fell inside the visible frame
+    // even though zero actual SAT nodes are anywhere near it. 0.5 degrees
+    // (~35mi) keeps the frame to the core cluster; SAT<->AUS centroids are
+    // 1.13 degrees apart, so this doesn't swallow a neighboring region's
+    // core area. Applied as a preference, not a hard filter — see
+    // finalPts below — because a handful of sparser regions (e.g. CRP,
+    // ACT) have every single node further out than this from their own
+    // centroid, and excluding them outright would leave nothing to frame.
+    var MAX_RECENTER_RADIUS_DEG = 0.5;
+
     // Recenter/zoom the live map to fit the nodes currently on screen for
     // the selected region(s). No-op for "All Regions" (selected is null/empty)
     // or if the region has no located nodes yet — leaves the viewport as-is
@@ -1847,29 +1868,38 @@
     function recenterMapToRegion(selected) {
       if (!map) return;
       if (!selected || !selected.length) {
-        // "All Regions" — frame the whole state via the fixed centroid
-        // table rather than whatever nodes happen to be loaded (which
-        // could look lopsided depending on ingest timing/coverage).
-        var allPts = [];
-        for (var rc in REGION_CENTROIDS) allPts.push(REGION_CENTROIDS[rc]);
+        // "All Regions" — frame Texas's actual extent rather than the
+        // union of the 12 region centroids (see TEXAS_BOUNDS).
         try {
-          map.fitBounds(L.latLngBounds(allPts), { padding: [40, 40] });
+          map.fitBounds(TEXAS_BOUNDS, { padding: [10, 10] });
         } catch (e) {}
         return;
       }
       var selectedSet = {};
       for (var i = 0; i < selected.length; i++) selectedSet[String(selected[i]).toUpperCase()] = true;
-      var pts = [];
+      var pts = [];     // every node classified into a selected region
+      var nearPts = []; // subset within MAX_RECENTER_RADIUS_DEG of ITS OWN centroid
       for (var key in allNodeCoords) {
         var n = allNodeCoords[key];
         if (n && n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0)) {
           var region = nearestRegionCode(n.lat, n.lon);
-          if (region && selectedSet[region]) pts.push([n.lat, n.lon]);
+          if (region && selectedSet[region]) {
+            pts.push([n.lat, n.lon]);
+            var c = REGION_CENTROIDS[region];
+            var dLat = n.lat - c[0], dLon = n.lon - c[1];
+            if (dLat * dLat + dLon * dLon <= MAX_RECENTER_RADIUS_DEG * MAX_RECENTER_RADIUS_DEG) {
+              nearPts.push([n.lat, n.lon]);
+            }
+          }
         }
       }
-      if (!pts.length) return;
+      // Prefer the tightened "core" set; fall back to every classified
+      // point for a sparser region where the cap would otherwise leave
+      // nothing to frame (see MAX_RECENTER_RADIUS_DEG).
+      var finalPts = nearPts.length ? nearPts : pts;
+      if (!finalPts.length) return;
       try {
-        map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 12 });
+        map.fitBounds(L.latLngBounds(finalPts), { padding: [40, 40], maxZoom: 12 });
       } catch (e) {}
     }
 
