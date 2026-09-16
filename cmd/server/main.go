@@ -419,6 +419,31 @@ func main() {
 	defer close(stopNeighborGraphCache)
 	log.Printf("[neighbor-graph-cache] background recompute enabled (interval=%s)", ngInterval)
 
+	// Region-membership snapshot (GetNodes' region filter — backs the live
+	// map's region-filtered node list and region-filtered VCR replay/scrub).
+	// Was purely lazy: a request landing right after the 30s TTL lapsed paid
+	// the full live scan itself (measured ~10s on this dataset). regionMembership()
+	// already caches + singleflights that scan, so calling it proactively on a
+	// timer just under the TTL keeps the cache warm — the lazy path in
+	// regionMembership() is unchanged and still covers cold-start/failure cases.
+	stopRegionMembership := make(chan struct{})
+	regionMembershipRecomputeInterval := regionMembershipTTL - 5*time.Second
+	go func() {
+		database.regionMembership()
+		t := time.NewTicker(regionMembershipRecomputeInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				database.regionMembership()
+			case <-stopRegionMembership:
+				return
+			}
+		}
+	}()
+	defer close(stopRegionMembership)
+	log.Printf("[region-membership] background recompute enabled (interval=%s)", regionMembershipRecomputeInterval)
+
 	// Known-channels catalogue cache (issue #1323). OPT-IN: an empty
 	// cfg.KnownChannelsURL leaves srv.knownChannels nil and starts no
 	// background fetch. The /api/known-channels endpoint then serves an
