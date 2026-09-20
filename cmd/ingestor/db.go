@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/packetpath"
-	_ "modernc.org/sqlite"
 )
 
 // DBStats tracks operational metrics for the ingestor database.
@@ -130,7 +130,7 @@ func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error)
 		return nil, fmt.Errorf("creating data dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=auto_vacuum(INCREMENTAL)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite3", dbschema.WriterDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("opening db: %w", err)
 	}
@@ -141,7 +141,7 @@ func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error)
 
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	log.Printf("SQLite config: busy_timeout=5000ms, max_open_conns=1, max_idle_conns=1, journal=WAL")
+	log.Printf("SQLite config: busy_timeout=5000ms, max_open_conns=1, max_idle_conns=1, journal=WAL, synchronous=FULL")
 
 	if err := applySchema(db); err != nil {
 		return nil, fmt.Errorf("applying schema: %w", err)
@@ -427,6 +427,27 @@ func applySchema(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_crf_prune ON client_rf_samples(sampled_at);
 		CREATE INDEX IF NOT EXISTS idx_crf_track ON client_rf_samples(rx_pubkey, sampled_at);
+
+		-- Declared region lists reported by repeaters via ANON_REQ_TYPE_REGIONS.
+		-- Observations, never state: "current" is the greatest observed_at for a
+		-- target, NOT the greatest ingested_at — a drive buffered offline can
+		-- arrive days late and must not overwrite a fresher reading.
+		CREATE TABLE IF NOT EXISTS node_declared_regions (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			target         TEXT NOT NULL,
+			rx_pubkey      TEXT NOT NULL,
+			observed_at    TEXT NOT NULL,
+			ingested_at    TEXT NOT NULL,
+			regions_csv    TEXT NOT NULL,
+			truncated      INTEGER NOT NULL DEFAULT 0,
+			lat            REAL,
+			lon            REAL,
+			pos_acc_m      REAL,
+			repeater_clock INTEGER,
+			UNIQUE(target, rx_pubkey, observed_at)
+		);
+		CREATE INDEX IF NOT EXISTS idx_ndr_target ON node_declared_regions(target, observed_at);
+		CREATE INDEX IF NOT EXISTS idx_ndr_prune  ON node_declared_regions(observed_at);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("base schema: %w", err)

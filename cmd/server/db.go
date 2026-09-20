@@ -11,12 +11,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/geofilter"
 	"golang.org/x/sync/singleflight"
-	_ "modernc.org/sqlite"
 )
 
 // routeTypeTransport covers TRANSPORT_FLOOD (0) and TRANSPORT_DIRECT (3) —
@@ -44,9 +45,15 @@ type DB struct {
 	hasScopeName            bool   // transmissions.scope_name column exists (#899)
 	hasDefaultScope         bool   // nodes.default_scope column exists (#899)
 	hasConfiguredScope      bool   // nodes.configured_scope column exists (#1865)
-	hasDeclaredRegionsTable bool   // node_declared_regions table exists (#1975, optional second scope source)
+	hasDeclaredRegionsTable bool   // node_declared_regions table exists at startup (#1975); read via declaredRegionsTablePresent
 	hasMultibyteSupCols     bool   // nodes/inactive_nodes have multibyte_sup/multibyte_evidence (#903)
 	hasLastSeen             bool   // transmissions.last_seen column exists (#1690)
+
+	// declaredRegionsTableLate latches true once node_declared_regions is found
+	// after startup. The ingestor creates that table, and the two processes
+	// start together, so on the first run of a build that adds it the server's
+	// startup probe can lose the race. See declaredRegionsTablePresent.
+	declaredRegionsTableLate atomic.Bool
 
 	// Channel list caches, keyed by region param — avoids repeated GROUP BY
 	// scans (#762). Keyed per-region (not a single slot) so mixed-region
@@ -131,10 +138,25 @@ type channelMessagesCacheEntry struct {
 	exp   time.Time
 }
 
-// OpenDB opens a read-only SQLite connection with WAL mode.
+// OpenDB opens a read-only SQLite connection.
+//
+// The DSN used to pass _journal_mode=WAL and _busy_timeout=5000, which
+// modernc.org/sqlite silently ignored: it understood only the
+// _pragma=name(value) form. Under github.com/mattn/go-sqlite3 those parameters
+// are honoured, and setting journal_mode on a read-only handle is a write — it
+// would succeed only because the database is already WAL. Both are gone:
+// mattn's own busy_timeout default is already 5000ms, so the read handle keeps
+// the timeout (which it had silently lacked) without the pointless write.
+//
+// What remains is deliberate. mode=ro is the read-only invariant from
+// #1283/#1289 and works because mattn's C wrapper ORs SQLITE_OPEN_URI into the
+// open flags — see TestOpenDBRefusesMissingDatabase, which fails if that ever
+// stops holding. _cache_size pins SQLite's C-allocated page cache at 2 MiB per
+// connection; it sits outside GOMEMLIMIT, so it is bounded here rather than
+// left to the driver's default (see memlimit.go).
 func OpenDB(path string) (*DB, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL&_busy_timeout=5000", path)
-	conn, err := sql.Open("sqlite", dsn)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_cache_size=-2000", path)
+	conn, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
