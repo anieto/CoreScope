@@ -1869,11 +1869,9 @@ func (s *PacketStore) QueryPackets(q PacketQuery) *PacketResult {
 		pageSize = total - start
 	}
 
-	packets := make([]map[string]interface{}, 0, pageSize)
+	var pageTxs []*StoreTx
 	if q.Order == "ASC" {
-		for _, tx := range results[start : start+pageSize] {
-			packets = append(packets, s.txToMapWithRP(tx, q.ExpandObservations))
-		}
+		pageTxs = results[start : start+pageSize]
 	} else {
 		// DESC: newest items are at the tail; page 0 = last pageSize items reversed
 		endIdx := total - start
@@ -1881,9 +1879,31 @@ func (s *PacketStore) QueryPackets(q PacketQuery) *PacketResult {
 		if startIdx < 0 {
 			startIdx = 0
 		}
+		pageTxs = make([]*StoreTx, 0, endIdx-startIdx)
 		for i := endIdx - 1; i >= startIdx; i-- {
-			packets = append(packets, s.txToMapWithRP(results[i], q.ExpandObservations))
+			pageTxs = append(pageTxs, results[i])
 		}
+	}
+
+	// Perf: txToMapWithRP does an on-demand SQL fetch per observation for
+	// resolved_path (LRU-cached, but only after the first miss). A page of
+	// up to PacketsMax packets, each with several observations, was
+	// previously issuing one individual SQLite query per observation —
+	// tens of thousands of round trips for a single VCR-replay request
+	// (limit=10000&expand=observations). Batch-fetch resolved_path for
+	// every observation in this page in one (chunked) query and pre-warm
+	// the LRU so the existing per-item lookups below become cache hits.
+	obsIDs := make([]int, 0, len(pageTxs)*2)
+	for _, tx := range pageTxs {
+		for _, o := range tx.Observations {
+			obsIDs = append(obsIDs, o.ID)
+		}
+	}
+	s.prewarmResolvedPathLRU(obsIDs)
+
+	packets := make([]map[string]interface{}, 0, pageSize)
+	for _, tx := range pageTxs {
+		packets = append(packets, s.txToMapWithRP(tx, q.ExpandObservations))
 	}
 	return &PacketResult{Packets: packets, Total: total}
 }

@@ -286,6 +286,87 @@ func (s *PacketStore) fetchResolvedPathForTxBest(tx *StoreTx) []*string {
 	return bestRP
 }
 
+// prewarmResolvedPathLRU batch-fetches resolved_path for the given
+// observation IDs and populates the LRU cache for the ones that already
+// have a resolved value. Called before a page of packets is mapped via
+// txToMapWithRP so its per-item fetchResolvedPathForObs calls hit the LRU
+// instead of each issuing its own SQLite query (the N+1 pattern QueryPackets
+// hit under expand=observations with large limits, e.g. VCR replay).
+//
+// Deliberately does NOT cache negative results (IDs with no resolved_path
+// yet): resolved_path can be filled in later by the ingestor on re-ingest
+// (see cmd/ingestor/resolved_path.go's COALESCE upsert), so an observation
+// that's unresolved right now must keep falling through to the existing
+// on-demand SQL path rather than being cached as permanently empty.
+func (s *PacketStore) prewarmResolvedPathLRU(obsIDs []int) {
+	if len(obsIDs) == 0 || s.db == nil || s.db.conn == nil {
+		return
+	}
+
+	s.lruMu.RLock()
+	toFetch := make([]int, 0, len(obsIDs))
+	seen := make(map[int]bool, len(obsIDs))
+	for _, id := range obsIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if _, ok := s.apiResolvedPathLRU[id]; !ok {
+			toFetch = append(toFetch, id)
+		}
+	}
+	s.lruMu.RUnlock()
+	if len(toFetch) == 0 {
+		return
+	}
+
+	found := make(map[int][]*string, len(toFetch))
+	const chunkSize = 499 // stay well under SQLite's default parameter limit
+	for start := 0; start < len(toFetch); start += chunkSize {
+		end := start + chunkSize
+		if end > len(toFetch) {
+			end = len(toFetch)
+		}
+		chunk := toFetch[start:end]
+
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[i] = id
+		}
+		query := "SELECT id, resolved_path FROM observations WHERE id IN (" +
+			string(placeholders) + ") AND resolved_path IS NOT NULL"
+		rows, err := s.db.conn.Query(query, args...)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var obsID int
+			var rpJSON sql.NullString
+			if err := rows.Scan(&obsID, &rpJSON); err != nil {
+				continue
+			}
+			if rpJSON.Valid && rpJSON.String != "" {
+				found[obsID] = unmarshalResolvedPath(rpJSON.String)
+			}
+		}
+		rows.Close()
+	}
+
+	if len(found) == 0 {
+		return
+	}
+	s.lruMu.Lock()
+	for id, rp := range found {
+		s.lruPut(id, rp)
+	}
+	s.lruMu.Unlock()
+}
+
 // --- Simple LRU cache for resolved paths ---
 
 const lruMaxSize = 10000
