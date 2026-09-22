@@ -1297,8 +1297,8 @@
   // drawPacketRoute when only one observation is provided.
   //
   // opts.canonicalPath (optional): use this exact hop sequence as the canonical
-  // spine — i.e. the observation the operator selected. Without it, longest-path
-  // wins, which can show a totally different route than the user clicked.
+  // spine — i.e. the observation the operator selected. Without it, the most
+  // commonly observed unique path wins (same ranking as the sidebar picker).
   async function drawPacketRouteMulti(paths, origin, opts) {
     opts = opts || {};
     if (typeof origin === 'string') origin = { pubkey: origin };
@@ -1311,13 +1311,27 @@
     }
 
     // Pick canonical: prefer caller-supplied (operator's chosen observation),
-    // else fall back to longest path as the spine.
+    // else default to the most commonly observed unique path — the same
+    // grouping+ranking the sidebar's path picker uses (route-view.js), so
+    // the map's default view matches the picker's top row. A rarely-seen
+    // longest path was a confusing default: usually longer, often less
+    // resolvable, and not representative of what most observers actually saw.
     var canonicalPath;
     if (opts.canonicalPath && Array.isArray(opts.canonicalPath) && opts.canonicalPath.length) {
       canonicalPath = opts.canonicalPath;
     } else {
-      const sortedByLen = paths.slice().sort((a, b) => (b.path || []).length - (a.path || []).length);
-      canonicalPath = sortedByLen[0].path || [];
+      var _groups = {};
+      paths.forEach(function (p) {
+        var _rawHops = p.path || [];
+        var _hops = (typeof window !== 'undefined' && window.MC_filterPathHops)
+          ? window.MC_filterPathHops(_rawHops)
+          : _rawHops;
+        var _k = _hops.length ? _hops.join('→') : ('⟨all-1byte⟩::' + _rawHops.join('→'));
+        if (!_groups[_k]) _groups[_k] = { count: 0, path: _rawHops };
+        _groups[_k].count++;
+      });
+      var _sortedByCount = Object.values(_groups).sort(function (a, b) { return b.count - a.count; });
+      canonicalPath = (_sortedByCount[0] && _sortedByCount[0].path) || (paths[0] && paths[0].path) || [];
     }
     const totalObservers = paths.length;
 
@@ -1468,6 +1482,11 @@
       // Pick the user-chosen observation by id, fall back to first
       let chosen = null;
       if (obsId) chosen = observations.find(o => String(o.id) === String(obsId));
+      // Track whether the URL actually named a real observation — as opposed
+      // to falling back to `observations[0]`, which is an arbitrary pick (DB
+      // order, not "best" or "most common") and should NOT be forced onto the
+      // map as the displayed route. See canonicalObsChosen below.
+      const canonicalObsChosen = !!chosen;
       if (!chosen) chosen = observations[0];
       // Parse decoded for src/dst.
       // Try observation first, fall back to packet-level decoded_json (GRP_TXT
@@ -1702,7 +1721,13 @@
         drawPacketRouteMulti(allPaths, origin, {
           packetHash: packetHash,
           observationId: obsId,
-          canonicalPath: chosenPath,
+          // Only pin the map to a specific observation's path when the URL
+          // named a real one (?obs=<id> that matched). Otherwise leave
+          // canonicalPath unset so drawPacketRouteMulti defaults to the most
+          // commonly observed path — an arbitrary first-observation pick
+          // (e.g. a 2-hop outlier out of 32 recorded paths) was a confusing,
+          // effectively-random default.
+          canonicalPath: canonicalObsChosen ? chosenPath : null,
           destination: destination,
           packetContext: pktCtx
         });

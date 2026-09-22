@@ -108,7 +108,9 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   padding: 4px 8px;
   cursor: pointer;
   font-size: 10px;
-  color: var(--text-muted, #94a3b8);
+  /* Brighter than --text-muted: this is an instruction ("click to isolate"),
+     not passive metadata, and was easy to miss at muted-caption brightness. */
+  color: var(--text, #cbd5e1);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   list-style: none;
@@ -145,17 +147,38 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   border-top: 1px solid var(--border, #333);
 }
 .mc-rt-path-row {
+  position: relative;
   display: grid;
   grid-template-columns: 36px 1fr auto;
   column-gap: 6px;
   align-items: center;
-  padding: 4px 8px;
+  padding: 4px 16px 4px 8px;
   cursor: pointer;
   border-bottom: 1px solid rgba(255,255,255,0.04);
   font-family: ui-monospace, Menlo, monospace;
 }
-.mc-rt-path-row:hover {
-  background: var(--bg-hover, rgba(120,160,255,0.08));
+/* Hover-revealed arrow: rows read as plain data rows without it — the
+   subtle background tint alone wasn't enough for people to realize each
+   row is clickable to isolate that path on the map. */
+.mc-rt-path-row::after {
+  content: '\2192';
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--accent, #06b6d4);
+  font-family: system-ui, sans-serif;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.mc-rt-path-row:hover,
+.mc-rt-path-row:focus {
+  background: var(--bg-hover, rgba(120,160,255,0.16));
+}
+.mc-rt-path-row:hover::after,
+.mc-rt-path-row:focus::after {
+  opacity: 1;
 }
 .mc-rt-path-row.mc-rt-path-active {
   background: var(--bg-hover, rgba(120,160,255,0.18));
