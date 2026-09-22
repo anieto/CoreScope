@@ -1428,7 +1428,10 @@
           'background:var(--mc-bg-secondary,#1a1a1a);color:var(--mc-text-primary,#e5e5e5);' +
           'padding:10px 16px;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.4);' +
           'z-index:10000;font:13px/1.4 system-ui,sans-serif;max-width:80vw;text-align:center;';
-        hintToast.textContent = '💡 Tip: click any path below to see it on the map';
+        // No directional word ("below"/"left"): the sidebar is a left panel
+        // on desktop but a bottom sheet on mobile, and this toast floats
+        // over the map either way, not adjacent to the list itself.
+        hintToast.textContent = '💡 Tip: click any path in the list to see it on the map';
         document.body.appendChild(hintToast);
         setTimeout(function () { try { hintToast.remove(); } catch (e) {} }, 6000);
         localStorage.setItem('mc-rt-path-hint-seen', '1');
