@@ -311,7 +311,12 @@
     });
 
     var totalKm = dists.filter(function(d){return d!=null}).reduce(function(a,b){return a+b},0);
-    var unresolvedCount = positions.filter(function(p){return p.resolved===false}).length;
+    // Two genuinely different cases, already distinguished per-row (below,
+    // "no GPS" vs "unknown" status chips) but previously conflated into one
+    // "N unresolved" header count — misleading for a gpsless hop, since we
+    // know exactly which node it is, just not its coordinates.
+    var gpslessCount = positions.filter(function(p){return p.resolved===false && p.gpsless}).length;
+    var unknownCount = positions.filter(function(p){return p.resolved===false && !p.gpsless}).length;
     var multiPath = (opts && opts.multiPath) === true;
     var totalObservers = (opts && opts.totalObservers) || 1;
     var packetHash = (opts && opts.packetHash) || null;
@@ -444,7 +449,8 @@
           backLink +
         '</div>' +
         '<div class="mc-rt-meta">' + total + ' hops · ' + totalKm + ' km' +
-          (unresolvedCount ? ' · ' + unresolvedCount + ' unresolved' : '') +
+          (gpslessCount ? ' · ' + gpslessCount + ' no GPS' : '') +
+          (unknownCount ? ' · ' + unknownCount + ' unresolved' : '') +
         '</div>' +
         contextBlock +
         multiPathChip +
