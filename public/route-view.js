@@ -343,15 +343,17 @@
     })() : 1;
     var multiPathChip = '';
     var pathPicker = '';
-    // One-time hint: the very first time someone lands on a multi-path route,
-    // pulse the picker (CSS, see mc-rt-paths-pulse) and pair it with a toast
-    // (added in render(), below, after this sidebar is actually inserted).
-    // Gated on localStorage so it only ever fires once per browser — the
-    // click-to-isolate rows previously had no indication they were
-    // interactive besides a subtle hover tint.
-    var showPathHint = false;
+    // Entry hint for the picker: the click-to-isolate rows had no indication
+    // they were interactive besides a subtle hover tint, so every multi-path
+    // route gets a brief pulse (CSS, see mc-rt-paths-pulse) — it's subtle
+    // enough to not bother a returning viewer, and keeps working as a cue
+    // for anyone new. The one-time toast (render(), below, after this
+    // sidebar is inserted) is a bigger interruption than a soft glow, so
+    // that part stays gated to a viewer's very first encounter only.
+    var showPathHint = multiPath;
+    var showPathToastHint = false;
     if (multiPath) {
-      try { showPathHint = !localStorage.getItem('mc-rt-path-hint-seen'); } catch (e) {}
+      try { showPathToastHint = !localStorage.getItem('mc-rt-path-hint-seen'); } catch (e) {}
       multiPathChip = '<div class="mc-rt-multipath-chip">' +
         '<div><b>' + totalObservers + '</b> observers · <b>' + uniquePathsCount + '</b> unique paths</div>' +
         '<div class="mc-rt-multipath-key">thicker edge = more observers saw it</div>' +
@@ -1070,6 +1072,11 @@
       });
     }
 
+    // buildSidebar only returns the DOM node, not a data object — stash the
+    // toast decision (separate from the always-on pulse, see showPathHint
+    // above) here so render() can read it back after inserting this element.
+    if (showPathToastHint) sidebar.dataset.showPathToastHint = '1';
+
     return sidebar;
   }
 
@@ -1416,10 +1423,11 @@
       document.body.appendChild(sidebar);
     }
 
-    // Paired with the picker's one-time pulse (buildSidebar, above): same
-    // localStorage gate, so this only ever shows once per browser, and only
-    // together with the pulse — not on every multi-path route thereafter.
-    if (sidebar.querySelector('.mc-rt-paths-pulse')) {
+    // The pulse itself (buildSidebar, above) now runs on every multi-path
+    // route — subtle enough not to bother a returning viewer. This toast is
+    // a bigger interruption, so it stays gated to a viewer's very first
+    // encounter (sidebar.dataset.showPathToastHint, set in buildSidebar).
+    if (sidebar.dataset.showPathToastHint === '1') {
       try {
         var hintToast = document.createElement('div');
         hintToast.setAttribute('role', 'status');
