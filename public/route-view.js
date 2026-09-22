@@ -343,7 +343,15 @@
     })() : 1;
     var multiPathChip = '';
     var pathPicker = '';
+    // One-time hint: the very first time someone lands on a multi-path route,
+    // pulse the picker (CSS, see mc-rt-paths-pulse) and pair it with a toast
+    // (added in render(), below, after this sidebar is actually inserted).
+    // Gated on localStorage so it only ever fires once per browser — the
+    // click-to-isolate rows previously had no indication they were
+    // interactive besides a subtle hover tint.
+    var showPathHint = false;
     if (multiPath) {
+      try { showPathHint = !localStorage.getItem('mc-rt-path-hint-seen'); } catch (e) {}
       multiPathChip = '<div class="mc-rt-multipath-chip">' +
         '<div><b>' + totalObservers + '</b> observers · <b>' + uniquePathsCount + '</b> unique paths</div>' +
         '<div class="mc-rt-multipath-key">thicker edge = more observers saw it</div>' +
@@ -400,7 +408,7 @@
           '<span class="mc-rt-path-obs" title="' + escapeHtml(g.observers.join(', ')) + '">' + escapeHtml(sample) + moreSuffix + '</span>' +
         '</li>';
       }).join('');
-      pathPicker = '<details class="mc-rt-paths" open><summary class="mc-rt-paths-header">' +
+      pathPicker = '<details class="mc-rt-paths' + (showPathHint ? ' mc-rt-paths-pulse' : '') + '" open><summary class="mc-rt-paths-header">' +
         '<svg class="ph-icon mc-rt-paths-chevron" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg>' +
         uniquePathsCount + ' unique paths · click to isolate' +
         '<button type="button" class="mc-rt-path-clear" aria-label="Show all paths">All</button>' +
@@ -1406,6 +1414,25 @@
       mapContainer.parentElement.insertBefore(sidebar, mapContainer);
     } else {
       document.body.appendChild(sidebar);
+    }
+
+    // Paired with the picker's one-time pulse (buildSidebar, above): same
+    // localStorage gate, so this only ever shows once per browser, and only
+    // together with the pulse — not on every multi-path route thereafter.
+    if (sidebar.querySelector('.mc-rt-paths-pulse')) {
+      try {
+        var hintToast = document.createElement('div');
+        hintToast.setAttribute('role', 'status');
+        hintToast.setAttribute('aria-live', 'polite');
+        hintToast.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);' +
+          'background:var(--mc-bg-secondary,#1a1a1a);color:var(--mc-text-primary,#e5e5e5);' +
+          'padding:10px 16px;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.4);' +
+          'z-index:10000;font:13px/1.4 system-ui,sans-serif;max-width:80vw;text-align:center;';
+        hintToast.textContent = '💡 Tip: click any path below to see it on the map';
+        document.body.appendChild(hintToast);
+        setTimeout(function () { try { hintToast.remove(); } catch (e) {} }, 6000);
+        localStorage.setItem('mc-rt-path-hint-seen', '1');
+      } catch (e) { console.warn('[route-view]', e); }
     }
 
     // Wire marker → sidebar (after sidebar exists). Click marker = scroll sidebar
