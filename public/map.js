@@ -1464,6 +1464,16 @@
       const params = new URLSearchParams(qs);
       const packetHash = params.get('packet');
       const obsId = params.get('obs');
+      // Explicit hop list (e.g. from the bot's own already-resolved {path}),
+      // takes priority over everything else below: it guarantees the map's
+      // default view matches whatever hop sequence a reply's own text just
+      // showed, rather than an unrelated observation the URL happens to
+      // reference. Comma-separated hex prefixes, same shape as an
+      // observation's own path_json entries.
+      const hopsParam = params.get('hops');
+      const hopsOverride = hopsParam
+        ? hopsParam.split(',').map(h => h.trim().toLowerCase()).filter(Boolean)
+        : null;
       if (!packetHash) return;
       // Wait for nodes to load (drawPacketRoute / Multi rely on `nodes` array
       // for the local-fallback resolver).
@@ -1721,13 +1731,13 @@
         drawPacketRouteMulti(allPaths, origin, {
           packetHash: packetHash,
           observationId: obsId,
-          // Only pin the map to a specific observation's path when the URL
-          // named a real one (?obs=<id> that matched). Otherwise leave
-          // canonicalPath unset so drawPacketRouteMulti defaults to the most
-          // commonly observed path — an arbitrary first-observation pick
-          // (e.g. a 2-hop outlier out of 32 recorded paths) was a confusing,
-          // effectively-random default.
-          canonicalPath: canonicalObsChosen ? chosenPath : null,
+          // Priority: 1) an explicit ?hops= list (matches a reply's own text
+          // exactly, e.g. the bot's !path response), 2) a real ?obs=<id>
+          // match, 3) unset — drawPacketRouteMulti then defaults to the most
+          // commonly observed path rather than an arbitrary first-observation
+          // pick (e.g. a 2-hop outlier out of 32 recorded paths).
+          canonicalPath: hopsOverride && hopsOverride.length ? hopsOverride
+            : (canonicalObsChosen ? chosenPath : null),
           destination: destination,
           packetContext: pktCtx
         });
