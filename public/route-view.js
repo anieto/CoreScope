@@ -1029,6 +1029,40 @@
       });
     }
 
+    // On-map "N hops shown of M" badge: the sidebar's own observer/path chip
+    // says the same thing, but nobody looking only at the map (not scrolling
+    // or reading the sidebar) ever sees it — a short default path can read
+    // as "that's the whole route" otherwise. Lives on the map canvas itself,
+    // and tapping it jumps straight to the same restoreAllPaths() the
+    // sidebar's own "All" button uses, then removes itself (its own promise
+    // is fulfilled once every path is shown).
+    if (mapRef && typeof mapRef.getContainer === 'function') {
+      var mapContainerEl = mapRef.getContainer();
+      // Always clear a stale badge from a prior route, even one that isn't
+      // multi-path itself — otherwise a badge from an earlier multi-path
+      // route lingers into a later single-path one it no longer describes.
+      var priorMapBadge = mapContainerEl.querySelector('.mc-rt-map-badge');
+      if (priorMapBadge) priorMapBadge.remove();
+    }
+    if (multiPath && mapRef && typeof mapRef.getContainer === 'function') {
+      var mapBadge = document.createElement('button');
+      mapBadge.type = 'button';
+      mapBadge.className = 'mc-rt-map-badge';
+      mapBadge.innerHTML = '<b>' + total + '</b> hop' + (total === 1 ? '' : 's') + ' shown · ' +
+        totalObservers + ' observers saw ' + uniquePathsCount + ' path' + (uniquePathsCount === 1 ? '' : 's') +
+        '<span class="mc-rt-map-badge-cta">tap to see all</span>';
+      mapBadge.setAttribute(
+        'aria-label',
+        'Showing ' + total + ' of ' + uniquePathsCount + ' observed paths. Tap to show all paths.'
+      );
+      mapBadge.addEventListener('click', function () {
+        pathRows.forEach(function (r) { r.classList.remove('mc-rt-path-active'); });
+        restoreAllPaths();
+        mapBadge.remove();
+      });
+      mapContainerEl.appendChild(mapBadge);
+    }
+
     // Sparkline interactivity
     var sparkDots = sidebar.querySelectorAll('.mc-rt-spark-dot');
     var tipEl = null;
