@@ -125,9 +125,26 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   cursor: pointer;
   max-width: 90vw;
 }
-.mc-rt-map-badge-line1 { display: flex; align-items: center; gap: 6px; }
+/* Plain text flow, not flex: a flex row with no flex-wrap forces each of
+   its 3 children (the count span, the loose "N observers..." text, the cta
+   span) to squeeze into whatever width is left on a narrow screen, which
+   made the count span wrap internally and land on its own line, ahead of
+   the text it belongs with. Normal inline flow just wraps at whichever
+   word boundary actually needs it, and the nowrap spans below (count, cta)
+   keep their own few words glued together regardless of where that is. */
+.mc-rt-map-badge-line1 { text-align: center; }
+.mc-rt-map-badge-count { white-space: nowrap; }
 .mc-rt-map-badge-line2 { font-size: 10px; color: var(--text-muted, #94a3b8); }
 .mc-rt-map-badge:hover { background: var(--bg-hover, rgba(120,160,255,0.16)); }
+@media (max-width: 767px) {
+  /* A bit more clearance above the mobile bottom-sheet summary bar, and a
+     tighter max-width so the pill doesn't crowd the screen edges. */
+  .mc-rt-map-badge {
+    bottom: 24px;
+    max-width: calc(100vw - 24px);
+    font-size: 11px;
+  }
+}
 .mc-rt-map-badge-cta {
   color: var(--accent, #06b6d4);
   font-weight: 600;

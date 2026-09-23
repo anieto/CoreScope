@@ -1052,9 +1052,15 @@
       // calls restoreAllPaths), so the second line is plain informational
       // text about the OTHER way to explore — not a separate tap target of
       // its own, which is why it isn't styled like the "tap to see all" cta.
+      // Wrapping "N hops shown" and "tap to see all" each in their own
+      // nowrap span keeps the bold count glued to its own word instead of
+      // orphaning onto its own line when the flex row runs out of room on
+      // a narrow screen — plain text flow between the spans still wraps
+      // normally at whichever word boundary actually needs it.
       mapBadge.innerHTML =
-        '<div class="mc-rt-map-badge-line1"><b>' + total + '</b> hop' + (total === 1 ? '' : 's') + ' shown · ' +
-          totalObservers + ' observers saw ' + uniquePathsCount + ' path' + (uniquePathsCount === 1 ? '' : 's') +
+        '<div class="mc-rt-map-badge-line1">' +
+          '<span class="mc-rt-map-badge-count"><b>' + total + '</b> hop' + (total === 1 ? '' : 's') + ' shown</span> · ' +
+          totalObservers + ' observers saw ' + uniquePathsCount + ' path' + (uniquePathsCount === 1 ? '' : 's') + ' ' +
           '<span class="mc-rt-map-badge-cta">tap to see all</span>' +
         '</div>' +
         '<div class="mc-rt-map-badge-line2">or select a path in the sidebar</div>';
