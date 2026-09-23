@@ -104,17 +104,24 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   align-items: center;
   gap: 6px;
   padding: 7px 12px;
-  background: var(--mc-bg-secondary, #1a1a1a);
-  color: var(--mc-text-primary, #e5e5e5);
+  /* --surface-2/--border/--text — the same theme-aware trio .mc-rt-paths
+     already uses successfully. The toast blocks elsewhere in this codebase
+     use --mc-bg-secondary/--mc-text-primary, but those aren't real defined
+     variables (confirmed via getComputedStyle: empty string), so toasts
+     were silently always rendering their hardcoded dark fallback regardless
+     of theme — harmless for a toast that's gone in seconds, but this badge
+     is long-lived, and in light mode it rendered dark-background-dark-text,
+     completely illegible. Don't copy that pattern here. */
+  background: var(--surface-2, #232323);
+  color: var(--text, #cbd5e1);
   border: 1px solid var(--border, #333);
   border-radius: 999px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
   font: 12px/1.3 system-ui, sans-serif;
   cursor: pointer;
   max-width: 90vw;
 }
 .mc-rt-map-badge:hover { background: var(--bg-hover, rgba(120,160,255,0.16)); }
-.mc-rt-map-badge b { color: var(--text, #fff); }
 .mc-rt-map-badge-cta {
   color: var(--accent, #06b6d4);
   font-weight: 600;
