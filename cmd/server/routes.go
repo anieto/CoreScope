@@ -1237,6 +1237,49 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	if len(observations) == 0 && fromDB && s.db != nil && hash != "" {
 		observations = s.db.GetObservationsForHash(hash)
 	}
+	// #1999: give each observation its OWN wire bytes. Neither the store nor
+	// the DB observation query carries them — both deliberately drop
+	// observations.raw_hex (#881, ~98MB on a 1.7M-observation store) on the
+	// assumption that one content hash means one frame. The firmware hashes
+	// payload and type independently of the relay path, so that is false: on a
+	// production DB, 1844 of the 3000 most recent transmissions with multiple
+	// observations hold genuinely different frames, up to 51 of them for a
+	// single packet. Without this the detail view showed the transmission's
+	// canonical frame for every observation, which can contradict the
+	// path_json shown beside it.
+	//
+	// Done here rather than in enrichObs so it is one query for the whole
+	// request instead of one per observation, and after the store lock is
+	// released. Bytes already present win: a caller that built the map from a
+	// response (or a future path that does retain them) is not overwritten.
+	// The canonical frame, for observations that stored none of their own. The
+	// store path already fills this in (enrichObsWithTx falls back to
+	// tx.RawHex), but the DB-fallback path never has: its observation query
+	// selects no raw_hex at all, so those observations came back with the field
+	// missing entirely. Both paths end up consistent here.
+	// A stored per-observation frame WINS over whatever is already in the map.
+	// On the store path enrichObsWithTx has already put the transmission's
+	// canonical frame there, so skipping observations that "already have"
+	// raw_hex would skip every one of them and leave the bug in place on the
+	// main path. Only where no frame is stored does the canonical value stand.
+	canonicalHex, _ := packet["raw_hex"].(string)
+	if s.db != nil && hash != "" && len(observations) > 0 {
+		byObsID := s.db.ObservationRawHexForHash(hash)
+		for _, obs := range observations {
+			if id, ok := obs["id"].(int); ok {
+				if hx := byObsID[id]; hx != "" {
+					obs["raw_hex"] = hx
+					continue
+				}
+			}
+			if existing, ok := obs["raw_hex"].(string); ok && existing != "" {
+				continue
+			}
+			if canonicalHex != "" {
+				obs["raw_hex"] = canonicalHex
+			}
+		}
+	}
 	observationCount := len(observations)
 	if observationCount == 0 {
 		observationCount = 1
@@ -1291,9 +1334,10 @@ func (s *Server) handleDecode(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	limit := queryLimit(r, 50, s.cfg.ListLimits.NodesMax)
+	offset := queryInt(r, "offset", 0)
 	nodes, total, counts, err := s.db.GetNodes(
-		queryLimit(r, 50, s.cfg.ListLimits.NodesMax),
-		queryInt(r, "offset", 0),
+		limit, offset,
 		q.Get("role"), q.Get("search"), q.Get("before"),
 		q.Get("lastHeard"), q.Get("sortBy"), q.Get("region"),
 	)
@@ -1301,6 +1345,16 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	// Whether more rows exist is decided HERE, against the raw SQL page and the
+	// real COUNT(*), because both other candidate signals are destroyed further
+	// down: the geo-filter / blacklist / hidden-prefix / area passes drop rows
+	// from this page AND rewrite `total` to the filtered length. A page that
+	// loses a row is then short without being the last page, so a client that
+	// stops on a short page strands every node behind it (#1606 fixed the
+	// no-filter case only). has_more survives those passes untouched. Computed
+	// unconditionally (not inside the lite-gated block below) since neither the
+	// raw page nor total depend on whether enrichment runs.
+	hasMore := offset+len(nodes) < total
 	// Perf: callers that only need coordinates (e.g. the live map's
 	// region-recenter fitBounds) pay for none of the per-node enrichment
 	// below — relay/usefulness/bridge/coverage/redundancy scores and
@@ -1475,7 +1529,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			total = len(filtered)
 		}
 	}
-	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
+	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts, HasMore: hasMore})
 }
 
 func (s *Server) handleNodeSearch(w http.ResponseWriter, r *http.Request) {

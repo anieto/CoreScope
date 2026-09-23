@@ -44,6 +44,7 @@ node tests/unit/test-confidence-indicator.js
 node tests/unit/test-coverage-gate.js
 node tests/unit/test-customizer-v2.js
 node tests/unit/test-drag-manager.js
+node tests/unit/test-direct-rf-heard-by.js
 node tests/unit/test-embed-mode-1369.js
 node tests/unit/test-fetch-all-nodes-pagination.js
 node tests/unit/test-fluid-scaffolding.js
@@ -133,6 +134,7 @@ node tests/unit/test-issue-1868-control-decode.js
 node tests/unit/test-issue-1890-og-url.js
 node tests/unit/test-issue-1956-release-routing.js
 node tests/unit/test-issue-1979-scope-adverts-by-role.js
+node tests/unit/test-issue-1997-distance-building.js
 node tests/unit/test-issue-2001-map-scope-state.js
 node tests/unit/test-issue-2012-clear-filters-selection.js
 node tests/unit/test-live-anims.js
@@ -149,6 +151,7 @@ node tests/unit/test-node-hop-analytics.js
 node tests/unit/test-node-reach-coverage-debounce.js
 node tests/unit/test-node-reach-coverage.js
 node tests/unit/test-nodes-export-wiring.js
+node tests/unit/test-nav-drawer-version-footer.js
 node tests/unit/test-nodes-export.js
 node tests/unit/test-observer-iata-1188.js
 node tests/unit/test-observer-menu-interactions.js

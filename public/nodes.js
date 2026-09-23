@@ -650,6 +650,7 @@
       const h = healthData || {};
       const stats = h.stats || {};
       const observers = h.observers || [];
+      const relayObserverCount = Number(h.relayObserverCount) || 0;
       const recent = h.recentPackets || [];
       const lastHeard = stats.lastHeard;
 
@@ -777,10 +778,11 @@
         `; })()}
         </div>
 
-        ${observers.length ? `<div class="node-full-card" id="node-observers">
+        ${observers.length || relayObserverCount ? `<div class="node-full-card" id="node-observers">
           ${(() => { const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))]; return regions.length ? `<div style="margin-bottom:8px"><strong>Regions:</strong> ${regions.map(r => '<span class="badge" style="margin:0 2px">' + escapeHtml(r) + '</span>').join(' ')}</div>` : ''; })()}
-          <h4>Heard By (${observers.length} observer${observers.length > 1 ? 's' : ''})</h4>
-          <table class="data-table observer-sort-table" style="font-size:12px">
+          <h4 title="Observers that received this node's own transmission off the air. An observer that only saw traffic relayed through this node is counted separately below.">Heard By &mdash; direct (${observers.length} observer${observers.length === 1 ? '' : 's'})</h4>
+          ${observers.length ? '' : '<div class="text-muted" style="font-size:12px;padding:4px 0" title="Only flood-routed transmissions identify who was heard: a direct route removes the sender from the path before retransmitting (firmware Mesh.cpp, removeSelfFromPath), and an ambiguous relay hop is left unattributed rather than guessed. So an empty list is missing evidence, not proof of missing coverage.">No observation proves a direct reception here, which is not the same as being out of range.</div>'}
+          ${observers.length ? `<table class="data-table observer-sort-table" style="font-size:12px">
             <thead><tr>
               <th scope="col" data-sort-key="observer">Observer</th>
               <th scope="col" data-sort-key="region">Region</th>
@@ -797,7 +799,8 @@
                 <td data-value="${o.avgRssi != null ? Number(o.avgRssi) : ''}">${o.avgRssi != null ? Number(o.avgRssi).toFixed(0) + ' dBm' : '—'}</td>
               </tr>`).join('')}
             </tbody>
-          </table>
+          </table>` : ''}
+          ${relayObserverCount ? `<div class="text-muted" style="font-size:12px;padding:6px 0 0" id="node-relay-observers">Seen via relay by ${relayObserverCount} observer${relayObserverCount === 1 ? '' : 's'}. Those observers heard a repeater that forwarded this node's traffic, not this node.</div>` : ''}
         </div>` : ''}
 
         <div class="node-full-card" id="node-neighbors">
@@ -1229,9 +1232,10 @@
     try {
       // Fetch all nodes via pagination loop — server clamps /api/nodes ?limit
       // to 500 (PR #1540 / v3.8.3 DoS guard), so a single fetch silently
-      // truncates large deployments. Loop exit uses data.nodes.length < PAGE_SIZE
-      // as canonical stop — server total is unreliable under area filters
-      // (routes.go:1357 overwrites total = len(filtered)). See #1606.
+      // truncates large deployments. Loop exit uses data.has_more — server
+      // total is unreliable under area filters (overwritten with
+      // len(filtered)), and so is the page length, since the same filters drop
+      // rows from the page. See #1606 and the has_more note in app.js.
       if (!_allNodes) {
         const PAGE_SIZE = 500;
         const SAFETY_CAP = 10000; // hard ceiling to bound runaway loops
@@ -1260,8 +1264,16 @@
             const estTotal = firstTotal || '?';
             nodesBody.innerHTML = '<tr><td colspan="99" style="text-align:center;padding:2em">Loading nodes\u2026 ' + accumulated.length + '/' + estTotal + '</td></tr>';
           }
-          // M1 fix: exit when page is short (canonical stop), not based on total
-          if (data.nodes.length < PAGE_SIZE) break;
+          // Exit on has_more; fall back to a zero-length page against a server
+          // that predates it. A short page is NOT the end: handleNodes drops
+          // blacklisted / hidden / out-of-geofilter rows after the SQL LIMIT,
+          // so one filtered node in page 1 used to strand the whole rest of
+          // the list — including nodes that are actively relaying right now.
+          // Empty page ends it unconditionally (nothing here, nothing behind
+          // it); otherwise has_more decides, falling back to empty-page on a
+          // server that predates the flag.
+          if (data.nodes.length === 0) break;
+          if (typeof data.has_more === 'boolean' && !data.has_more) break;
           offset += PAGE_SIZE;
         }
         // TODO(m2): per-page cache invalidation — currently each page uses
@@ -1676,6 +1688,7 @@
     const h = data.healthData || {};
     const stats = h.stats || {};
     const observers = h.observers || [];
+    const relayObserverCount = Number(h.relayObserverCount) || 0;
     const recent = h.recentPackets || [];
     const hasLoc = n.lat != null && n.lon != null;
     const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
@@ -1749,9 +1762,10 @@
           `; })()}
         </div>
 
-        ${observers.length ? `<div class="node-detail-section">
+        ${observers.length || relayObserverCount ? `<div class="node-detail-section">
           ${(() => { const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))]; return regions.length ? `<div style="margin-bottom:6px;font-size:12px"><strong>Regions:</strong> ${regions.join(', ')}</div>` : ''; })()}
-          <h4>Heard By (${observers.length} observer${observers.length > 1 ? 's' : ''})</h4>
+          <h4 title="Observers that received this node's own transmission off the air.">Heard By &mdash; direct (${observers.length} observer${observers.length === 1 ? '' : 's'})</h4>
+          ${observers.length ? '' : '<div class="text-muted" style="font-size:12px;padding:4px 0" title="Only flood-routed transmissions identify who was heard: a direct route removes the sender from the path before retransmitting (firmware Mesh.cpp, removeSelfFromPath), and an ambiguous relay hop is left unattributed rather than guessed. So an empty list is missing evidence, not proof of missing coverage.">No observation proves a direct reception here, which is not the same as being out of range.</div>'}
           <div class="observer-list">
             ${observers.map(o => {
               const stats = [`${o.packetCount} pkts`];
@@ -1763,6 +1777,7 @@
             </div>`;
             }).join('')}
           </div>
+          ${relayObserverCount ? `<div class="text-muted" style="font-size:12px;padding:6px 0 0">Seen via relay by ${relayObserverCount} observer${relayObserverCount === 1 ? '' : 's'}.</div>` : ''}
         </div>` : ''}
 
         <div class="node-detail-section" id="panelNeighborsSection">

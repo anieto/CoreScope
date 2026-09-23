@@ -66,10 +66,17 @@ type DB struct {
 	// Measured live: a single cold request ran 3-5s, 5 concurrent requests
 	// for the same region ran ~8s each, all serialized against each other.
 	channelsSF singleflight.Group
+	// Test-only hook fired immediately before the real GetChannels query
+	// executes inside channelsSF's flight (i.e. once per coalesced miss,
+	// not once per caller). Nil in production. See db_singleflight_test.go.
+	channelsQueryHook func()
 
 	encChannelsCacheMu sync.Mutex
 	encChannelsCache   map[string]channelsCacheEntry
 	encChannelsSF      singleflight.Group
+	// Test-only hook, same contract as channelsQueryHook but for
+	// GetEncryptedChannels. Nil in production.
+	encChannelsQueryHook func()
 
 	// Channel messages cache, keyed by hash+limit+offset+region. Unlike
 	// GetChannels, this previously had no cache at all — every page
@@ -1146,6 +1153,54 @@ func (db *DB) allRegionMemberships() (map[string]map[string]bool, error) {
 		out[pubkey][iata] = true
 	}
 	return out, rows.Err()
+// ObservationRawHexForHash returns the stored wire bytes per observation id for
+// one transmission, keyed by observations.id. Empty when the schema has no
+// observations.raw_hex column (#881 made it optional) or nothing is stored.
+//
+// Why this is read on demand instead of held in memory (#1999): the store
+// deliberately does not retain obs.RawHex. #881 measured ~98MB wasted on a
+// ~1.7M-observation store, because at the time the frames were believed to be
+// identical per transmission ("same content hash implies same frame"). They are
+// not: the firmware hashes payload and type independently of the relay path, so
+// observations of one transmission legitimately carry different bytes. Keeping
+// the memory saving and paying one query on the packet-detail path, which is a
+// single packet a human is looking at, is the trade this makes.
+//
+// Two indexed lookups, one query, regardless of how many observations the
+// transmission has: transmissions.hash via idx_transmissions_hash (the prepared
+// stmtTxByHash), then observations.transmission_id via
+// idx_observations_transmission_id.
+func (db *DB) ObservationRawHexForHash(hash string) map[int]string {
+	if db == nil || db.conn == nil || !db.hasObsRawHex || hash == "" {
+		return nil
+	}
+	var txID int
+	if err := db.stmtQueryRow(db.stmtTxByHash, "SELECT id FROM transmissions WHERE hash = ?",
+		strings.ToLower(hash)).Scan(&txID); err != nil {
+		return nil
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, raw_hex FROM observations
+		 WHERE transmission_id = ? AND raw_hex IS NOT NULL AND raw_hex <> ''`, txID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make(map[int]string)
+	for rows.Next() {
+		var id int
+		var hx sql.NullString
+		if err := rows.Scan(&id, &hx); err != nil {
+			continue
+		}
+		if hx.Valid && hx.String != "" {
+			out[id] = hx.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
+	return out
 }
 
 // GetNodes returns filtered, paginated node list.
@@ -1869,6 +1924,10 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 			return cached, nil
 		}
 
+		if db.channelsQueryHook != nil {
+			db.channelsQueryHook()
+		}
+
 		regionCodes := normalizeRegionCodes(regionParam)
 
 		var querySQL string
@@ -1887,62 +1946,62 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 			args = append(append(make([]interface{}, 0, len(regionCodes)*2), args...), args...)
 			if db.isV3 {
 				querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity,
-					(SELECT t2.decoded_json FROM transmissions t2
-					 JOIN observations o2 ON o2.transmission_id = t2.id
-					 LEFT JOIN observers obs2 ON obs2.rowid = o2.observer_idx
-					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-					 AND obs2.rowid IS NOT NULL AND UPPER(TRIM(obs2.iata)) IN (%s)
-					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
-				WHERE t.payload_type = 5
-				AND t.channel_hash IS NOT NULL
-				AND t.channel_hash NOT LIKE 'enc_%%'
-				AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%s)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder, regionPlaceholder)
+						COUNT(*) AS msg_count,
+						MAX(t.first_seen) AS last_activity,
+						(SELECT t2.decoded_json FROM transmissions t2
+						 JOIN observations o2 ON o2.transmission_id = t2.id
+						 LEFT JOIN observers obs2 ON obs2.rowid = o2.observer_idx
+						 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+						 AND obs2.rowid IS NOT NULL AND UPPER(TRIM(obs2.iata)) IN (%s)
+						 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+					FROM transmissions t
+					JOIN observations o ON o.transmission_id = t.id
+					LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+					WHERE t.payload_type = 5
+					AND t.channel_hash IS NOT NULL
+					AND t.channel_hash NOT LIKE 'enc_%%'
+					AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%s)
+					GROUP BY t.channel_hash
+					ORDER BY last_activity DESC`, regionPlaceholder, regionPlaceholder)
 			} else {
 				querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity,
-					(SELECT t2.decoded_json FROM transmissions t2
-					 JOIN observations o2 ON o2.transmission_id = t2.id
-					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-					 AND EXISTS (
-						SELECT 1 FROM observers obs2
-						WHERE obs2.id = o2.observer_id
-						AND UPPER(TRIM(obs2.iata)) IN (%s)
-					 )
-					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				WHERE t.payload_type = 5
-				AND t.channel_hash IS NOT NULL
-				AND t.channel_hash NOT LIKE 'enc_%%'
-				AND EXISTS (
-					SELECT 1 FROM observers obs
-					WHERE obs.id = o.observer_id
-					AND UPPER(TRIM(obs.iata)) IN (%s)
-				)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder, regionPlaceholder)
+						COUNT(*) AS msg_count,
+						MAX(t.first_seen) AS last_activity,
+						(SELECT t2.decoded_json FROM transmissions t2
+						 JOIN observations o2 ON o2.transmission_id = t2.id
+						 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+						 AND EXISTS (
+							SELECT 1 FROM observers obs2
+							WHERE obs2.id = o2.observer_id
+							AND UPPER(TRIM(obs2.iata)) IN (%s)
+						 )
+						 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+					FROM transmissions t
+					JOIN observations o ON o.transmission_id = t.id
+					WHERE t.payload_type = 5
+					AND t.channel_hash IS NOT NULL
+					AND t.channel_hash NOT LIKE 'enc_%%'
+					AND EXISTS (
+						SELECT 1 FROM observers obs
+						WHERE obs.id = o.observer_id
+						AND UPPER(TRIM(obs.iata)) IN (%s)
+					)
+					GROUP BY t.channel_hash
+					ORDER BY last_activity DESC`, regionPlaceholder, regionPlaceholder)
 			}
 		} else {
 			querySQL = `SELECT channel_hash,
-				COUNT(*) AS msg_count,
-				MAX(first_seen) AS last_activity,
-				(SELECT t2.decoded_json FROM transmissions t2
-				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-			FROM transmissions t
-			WHERE payload_type = 5
-			AND channel_hash IS NOT NULL
-			AND channel_hash NOT LIKE 'enc_%%'
-			GROUP BY channel_hash
-			ORDER BY last_activity DESC`
+					COUNT(*) AS msg_count,
+					MAX(first_seen) AS last_activity,
+					(SELECT t2.decoded_json FROM transmissions t2
+					 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+					 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+				FROM transmissions t
+				WHERE payload_type = 5
+				AND channel_hash IS NOT NULL
+				AND channel_hash NOT LIKE 'enc_%%'
+				GROUP BY channel_hash
+				ORDER BY last_activity DESC`
 		}
 
 		rows, err := db.conn.Query(querySQL, args...)
@@ -2017,6 +2076,10 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			return cached, nil
 		}
 
+		if db.encChannelsQueryHook != nil {
+			db.encChannelsQueryHook()
+		}
+
 		regionCodes := normalizeRegionCodes(regionParam)
 
 		var querySQL string
@@ -2031,41 +2094,41 @@ func (db *DB) GetEncryptedChannels(region ...string) ([]map[string]interface{}, 
 			regionPlaceholder := strings.Join(placeholders, ",")
 			if db.isV3 {
 				querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				LEFT JOIN observers obs ON obs.rowid = o.observer_idx
-				WHERE t.payload_type = 5
-				AND t.channel_hash LIKE 'enc_%%'
-				AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%s)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
+						COUNT(*) AS msg_count,
+						MAX(t.first_seen) AS last_activity
+					FROM transmissions t
+					JOIN observations o ON o.transmission_id = t.id
+					LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+					WHERE t.payload_type = 5
+					AND t.channel_hash LIKE 'enc_%%'
+					AND obs.rowid IS NOT NULL AND UPPER(TRIM(obs.iata)) IN (%s)
+					GROUP BY t.channel_hash
+					ORDER BY last_activity DESC`, regionPlaceholder)
 			} else {
 				querySQL = fmt.Sprintf(`SELECT t.channel_hash,
-					COUNT(*) AS msg_count,
-					MAX(t.first_seen) AS last_activity
-				FROM transmissions t
-				JOIN observations o ON o.transmission_id = t.id
-				WHERE t.payload_type = 5
-				AND t.channel_hash LIKE 'enc_%%'
-				AND EXISTS (
-					SELECT 1 FROM observers obs
-					WHERE obs.id = o.observer_id
-					AND UPPER(TRIM(obs.iata)) IN (%s)
-				)
-				GROUP BY t.channel_hash
-				ORDER BY last_activity DESC`, regionPlaceholder)
+						COUNT(*) AS msg_count,
+						MAX(t.first_seen) AS last_activity
+					FROM transmissions t
+					JOIN observations o ON o.transmission_id = t.id
+					WHERE t.payload_type = 5
+					AND t.channel_hash LIKE 'enc_%%'
+					AND EXISTS (
+						SELECT 1 FROM observers obs
+						WHERE obs.id = o.observer_id
+						AND UPPER(TRIM(obs.iata)) IN (%s)
+					)
+					GROUP BY t.channel_hash
+					ORDER BY last_activity DESC`, regionPlaceholder)
 			}
 		} else {
 			querySQL = `SELECT channel_hash,
-				COUNT(*) AS msg_count,
-				MAX(first_seen) AS last_activity
-			FROM transmissions
-			WHERE payload_type = 5
-			AND channel_hash LIKE 'enc_%%'
-			GROUP BY channel_hash
-			ORDER BY last_activity DESC`
+					COUNT(*) AS msg_count,
+					MAX(first_seen) AS last_activity
+				FROM transmissions
+				WHERE payload_type = 5
+				AND channel_hash LIKE 'enc_%%'
+				GROUP BY channel_hash
+				ORDER BY last_activity DESC`
 		}
 
 		rows, err := db.conn.Query(querySQL, args...)

@@ -224,8 +224,13 @@ type PacketStore struct {
 	recompObserversClockSkew *analyticsRecomputer
 	recompNodesClockSkew     *analyticsRecomputer
 	recompRetransmissions    *analyticsRecomputer
-	cacheHits                int64
-	cacheMisses              int64
+	recompDirectHeard        *analyticsRecomputer
+	// directHeardSnap holds the latest directHeardIndex published by
+	// recompDirectHeard. Separate from the recomputer's own cache so
+	// readers never touch analyticsRecomputerMu. See direct_heard.go.
+	directHeardSnap atomic.Value
+	cacheHits       int64
+	cacheMisses     int64
 	// Rate-limited invalidation (fixes #533: caches cleared faster than hit)
 	lastInvalidated time.Time
 	pendingInv      *cacheInvalidation // accumulated dirty flags during cooldown
@@ -1446,7 +1451,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 	// critical section. After this point the new state is fully visible;
 	// before it readers see the old slice (which is still fully indexed).
 	s.mu.Lock()
-	s.packets = append(localPackets, s.packets...)
+	s.packets = mergeChunkIntoPackets(localPackets, s.packets)
 	s.totalObs += localTotalObs
 	s.trackedBytes += localTrackedBytes
 	if localMaxTxID > s.maxTxID {
@@ -4761,6 +4766,47 @@ func (s *PacketStore) EvictStaleWithRP(rpBatch map[int][]string) int {
 // Must be called under s.mu.Lock.
 func (s *PacketStore) EvictStale() int {
 	return s.evictStaleInternal(nil)
+}
+
+// mergeChunkIntoPackets merges a background chunk into the packet slice while
+// keeping the invariant s.packets is declared with: "sorted by first_seen ASC
+// (oldest first; newest at tail)". Retention eviction depends on it, walking
+// from the head and stopping at the first transmission inside the window, so a
+// slice that is out of order is silently under-evicted rather than noisily
+// wrong.
+//
+// The chunk cannot simply be put in front. Chunks are selected by last_seen,
+// so a transmission first heard weeks ago and heard again recently arrives in
+// a recent chunk carrying its old FirstSeen. On a production database 2071 of
+// the 236080 transmissions in a 14 day window have a first_seen more than a
+// day older than their last_seen, 1848 of them more than a week.
+//
+// Linear on purpose: this runs under s.mu once per chunk, and re-sorting the
+// whole slice there would mean sorting hundreds of thousands of packets while
+// ingest waits. The chunk itself is sorted first, which is the only
+// comparison sort involved and is bounded by one chunk. LoadChunked does its
+// own sort once at the end of the initial load; this keeps that invariant true
+// for every chunk merged afterwards.
+func mergeChunkIntoPackets(chunk, existing []*StoreTx) []*StoreTx {
+	less := func(i, j int) bool { return chunk[i].FirstSeen < chunk[j].FirstSeen }
+	if !sort.SliceIsSorted(chunk, less) {
+		sort.SliceStable(chunk, less)
+	}
+
+	out := make([]*StoreTx, 0, len(chunk)+len(existing))
+	i, j := 0, 0
+	for i < len(chunk) && j < len(existing) {
+		if chunk[i].FirstSeen <= existing[j].FirstSeen {
+			out = append(out, chunk[i])
+			i++
+		} else {
+			out = append(out, existing[j])
+			j++
+		}
+	}
+	out = append(out, chunk[i:]...)
+	out = append(out, existing[j:]...)
+	return out
 }
 
 func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
@@ -9355,6 +9401,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 		areaNodes = s.resolveAreaNodes(area)
 	}
 
+	// Loaded before s.mu so the lock order stays s.mu → analyticsRecomputerMu.
+	directHeard := s.loadDirectHeard()
+	nonRelaySet, seenSet := s.canRelaySets()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -9434,11 +9484,10 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 		var snrSum float64
 		var snrCount int
 		var lastHeard string
-		observerStats := map[string]*struct {
-			name                       string
-			snrSum, rssiSum            float64
-			snrCount, rssiCount, count int
-		}{}
+		// See GetNodeHealth: this set is "saw traffic involving the node",
+		// which is not "heard the node". Only the direct-RF rows below carry
+		// signal numbers.
+		relayObservers := map[string]struct{}{}
 		totalObservations := 0
 
 		for _, pkt := range packets {
@@ -9456,46 +9505,14 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			if lastHeard == "" || pkt.FirstSeen > lastHeard {
 				lastHeard = pkt.FirstSeen
 			}
-			obsID := pkt.ObserverID
-			if obsID != "" {
-				obs := observerStats[obsID]
-				if obs == nil {
-					obs = &struct {
-						name                       string
-						snrSum, rssiSum            float64
-						snrCount, rssiCount, count int
-					}{name: pkt.ObserverName}
-					observerStats[obsID] = obs
-				}
-				obs.count++
-				if pkt.SNR != nil {
-					obs.snrSum += *pkt.SNR
-					obs.snrCount++
-				}
-				if pkt.RSSI != nil {
-					obs.rssiSum += *pkt.RSSI
-					obs.rssiCount++
-				}
+			if pkt.ObserverID != "" {
+				relayObservers[pkt.ObserverID] = struct{}{}
 			}
 		}
 
-		observerRows := make([]map[string]interface{}, 0)
-		for id, o := range observerStats {
-			var avgSnr, avgRssi interface{}
-			if o.snrCount > 0 {
-				avgSnr = o.snrSum / float64(o.snrCount)
-			}
-			if o.rssiCount > 0 {
-				avgRssi = o.rssiSum / float64(o.rssiCount)
-			}
-			observerRows = append(observerRows, map[string]interface{}{
-				"observer_id": id, "observer_name": o.name,
-				"avgSnr": avgSnr, "avgRssi": avgRssi, "packetCount": o.count,
-			})
-		}
-		sort.Slice(observerRows, func(i, j int) bool {
-			return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
-		})
+		directByObs := directHeard[strings.ToLower(n.pk)]
+		observerRows := buildDirectObserverRows(directByObs, nonRelaySet, seenSet)
+		relayObserverCount := relayOnlyObserverCount(relayObservers, directByObs)
 
 		var avgSnr interface{}
 		if snrCount > 0 {
@@ -9520,7 +9537,8 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				"avgSnr":             avgSnr,
 				"lastHeard":          lhVal,
 			},
-			"observers": observerRows,
+			"observers":          observerRows,
+			"relayObserverCount": relayObserverCount,
 		})
 	}
 
@@ -9553,6 +9571,10 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 		}
 	}
 
+	// Loaded before taking s.mu so the lock order stays s.mu →
+	// analyticsRecomputerMu everywhere (computeDirectHeard takes s.mu).
+	directHeard := s.loadDirectHeard()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -9566,11 +9588,12 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	var lastHeard string
 	totalObservations := 0
 
-	observerStats := map[string]*struct {
-		name                       string
-		snrSum, rssiSum            float64
-		snrCount, rssiCount, count int
-	}{}
+	// Observers that saw traffic involving this node — as originator, as a
+	// destination, or as a resolved relay hop. Seeing a packet is not
+	// hearing the node: the SNR/RSSI on such a transmission belongs to
+	// whichever node last transmitted the copy this observer received. Only
+	// the direct-RF set below may carry signal numbers. See direct_heard.go.
+	relayObservers := map[string]struct{}{}
 
 	for _, pkt := range packets {
 		totalObservations += pkt.ObservationCount
@@ -9590,85 +9613,15 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 			totalHops += len(hops)
 			hopCount++
 		}
-		// Observer stats
-		obsID := pkt.ObserverID
-		if obsID != "" {
-			obs := observerStats[obsID]
-			if obs == nil {
-				obs = &struct {
-					name                       string
-					snrSum, rssiSum            float64
-					snrCount, rssiCount, count int
-				}{name: pkt.ObserverName}
-				observerStats[obsID] = obs
-			}
-			obs.count++
-			if pkt.SNR != nil {
-				obs.snrSum += *pkt.SNR
-				obs.snrCount++
-			}
-			if pkt.RSSI != nil {
-				obs.rssiSum += *pkt.RSSI
-				obs.rssiCount++
-			}
+		if pkt.ObserverID != "" {
+			relayObservers[pkt.ObserverID] = struct{}{}
 		}
 	}
 
-	observerRows := make([]map[string]interface{}, 0)
-	// Issue #1290: surface listener/repeater hint on node detail by
-	// looking up can_relay for each observer that heard this node.
-	// One-shot fetch of the non-relay set keeps this O(observers) on
-	// rare events; nil on error degrades to "neither badge" client-side.
-	// Issue #1290: keep this set lowercase to match the convention used
-	// by the resolver (cmd/server/store.go pm.nonRelay) and by
-	// GetNonRelayObserverPubkeys (which already returns LOWER(id)).
-	// Two case conventions on the same upstream string would be a
-	// latent regression waiting for any refactor that touches the
-	// observer-id normalization layer.
-	nonRelaySet := map[string]struct{}{}
-	// PR #1624 MAJOR-2: tri-state badge needs to distinguish "confirmed
-	// repeater" (seen=1, can_relay=1) from "unknown" (seen=0). Build
-	// the set of observers we have NO repeat-field record for so the
-	// badge is nil/omitted for them — matches nodes.js:679 tri-state.
-	seenSet := map[string]struct{}{}
-	if s.db != nil && s.db.conn != nil {
-		if pks, err := s.db.GetNonRelayObserverPubkeys(); err == nil {
-			for _, pk := range pks {
-				nonRelaySet[strings.ToLower(pk)] = struct{}{}
-			}
-		}
-		if pks, err := s.db.GetCanRelaySeenObserverPubkeys(); err == nil {
-			for _, pk := range pks {
-				seenSet[strings.ToLower(pk)] = struct{}{}
-			}
-		}
-	}
-	for id, o := range observerStats {
-		var avgSnr, avgRssi interface{}
-		if o.snrCount > 0 {
-			avgSnr = o.snrSum / float64(o.snrCount)
-		}
-		if o.rssiCount > 0 {
-			avgRssi = o.rssiSum / float64(o.rssiCount)
-		}
-		idLower := strings.ToLower(id)
-		var canRelay interface{} // nil = unknown (no repeat field ever)
-		if _, seen := seenSet[idLower]; seen {
-			if _, isListener := nonRelaySet[idLower]; isListener {
-				canRelay = false
-			} else {
-				canRelay = true
-			}
-		}
-		observerRows = append(observerRows, map[string]interface{}{
-			"observer_id": id, "observer_name": o.name,
-			"avgSnr": avgSnr, "avgRssi": avgRssi, "packetCount": o.count,
-			"can_relay": canRelay,
-		})
-	}
-	sort.Slice(observerRows, func(i, j int) bool {
-		return observerRows[i]["packetCount"].(int) > observerRows[j]["packetCount"].(int)
-	})
+	nonRelaySet, seenSet := s.canRelaySets()
+	directByObs := directHeard[strings.ToLower(pubkey)]
+	observerRows := buildDirectObserverRows(directByObs, nonRelaySet, seenSet)
+	relayObserverCount := relayOnlyObserverCount(relayObservers, directByObs)
 
 	var avgSnr interface{}
 	if snrCount > 0 {
@@ -9696,8 +9649,14 @@ func (s *PacketStore) GetNodeHealth(pubkey string) (map[string]interface{}, erro
 	}
 
 	return map[string]interface{}{
-		"node":      node,
+		"node": node,
+		// Direct-RF only: observers that received this node's own
+		// transmission off the air.
 		"observers": observerRows,
+		// Observers that saw traffic through this node without hearing it.
+		// The stats below count that relayed traffic too, so the card needs
+		// the number to stay consistent with them.
+		"relayObserverCount": relayObserverCount,
 		"stats": map[string]interface{}{
 			"totalTransmissions": len(packets),
 			"totalObservations":  totalObservations,
