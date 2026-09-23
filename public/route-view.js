@@ -1048,12 +1048,20 @@
       var mapBadge = document.createElement('button');
       mapBadge.type = 'button';
       mapBadge.className = 'mc-rt-map-badge';
-      mapBadge.innerHTML = '<b>' + total + '</b> hop' + (total === 1 ? '' : 's') + ' shown · ' +
-        totalObservers + ' observers saw ' + uniquePathsCount + ' path' + (uniquePathsCount === 1 ? '' : 's') +
-        '<span class="mc-rt-map-badge-cta">tap to see all</span>';
+      // Two lines: the whole pill is still one button (tapping anywhere
+      // calls restoreAllPaths), so the second line is plain informational
+      // text about the OTHER way to explore — not a separate tap target of
+      // its own, which is why it isn't styled like the "tap to see all" cta.
+      mapBadge.innerHTML =
+        '<div class="mc-rt-map-badge-line1"><b>' + total + '</b> hop' + (total === 1 ? '' : 's') + ' shown · ' +
+          totalObservers + ' observers saw ' + uniquePathsCount + ' path' + (uniquePathsCount === 1 ? '' : 's') +
+          '<span class="mc-rt-map-badge-cta">tap to see all</span>' +
+        '</div>' +
+        '<div class="mc-rt-map-badge-line2">or select a path in the sidebar</div>';
       mapBadge.setAttribute(
         'aria-label',
-        'Showing ' + total + ' of ' + uniquePathsCount + ' observed paths. Tap to show all paths.'
+        'Showing ' + total + ' of ' + uniquePathsCount + ' observed paths. Tap to show all paths, ' +
+          'or select a specific one from the sidebar list.'
       );
       mapBadge.addEventListener('click', function () {
         pathRows.forEach(function (r) { r.classList.remove('mc-rt-path-active'); });
