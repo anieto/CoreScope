@@ -1798,7 +1798,7 @@
     // City-center lat/lon for each MeshTexas IATA region, used only to
     // geographically reclassify nodes for the recenter/zoom below — NOT
     // used for the region filter's actual show/hide logic, which stays
-    // observer-tag-based (server-side) as before. Same 12 codes/coords as
+    // observer-tag-based (server-side) as before. Same 13 codes/coords as
     // livemap's REGION_CENTROIDS table.
     var REGION_CENTROIDS = {
       AUS: [30.2672, -97.7431],
@@ -1811,6 +1811,7 @@
       MFE: [26.2034, -98.2300],
       SJT: [31.4638, -100.4370],
       TXK: [33.4418, -94.0377],
+      GGG: [32.4200, -95.0200], // between Longview and Tyler ("Longview-Tyler")
       CRP: [27.8006, -97.3964],
       ACT: [31.5493, -97.1467],
     };
@@ -1851,10 +1852,16 @@
     // centroid, and excluding them outright would leave nothing to frame.
     var MAX_RECENTER_RADIUS_DEG = 0.5;
 
+    // Every selected region frames at least this far around its centroid
+    // (about 25 mi north-south; widened east-west for latitude). A sparse
+    // region whose located nodes all sit in one town (GGG: 16 nodes inside
+    // Henderson) otherwise zoomed to street level; dense regions already
+    // frame wider than this, so they're unchanged.
+    var MIN_REGION_HALF_SPAN_DEG = 0.35;
+
     // Recenter/zoom the live map to fit the nodes currently on screen for
-    // the selected region(s). No-op for "All Regions" (selected is null/empty)
-    // or if the region has no located nodes yet — leaves the viewport as-is
-    // rather than jumping to a default.
+    // the selected region(s), never tighter than the region's own area.
+    // "All Regions" (selected is null/empty) frames Texas instead.
     //
     // Classifies each node's region by its own real lat/lon (nearest
     // centroid) rather than trusting the server's observer-tagged `iata` —
@@ -1897,9 +1904,20 @@
       // point for a sparser region where the cap would otherwise leave
       // nothing to frame (see MAX_RECENTER_RADIUS_DEG).
       var finalPts = nearPts.length ? nearPts : pts;
-      if (!finalPts.length) return;
+      var bounds = finalPts.length ? L.latLngBounds(finalPts) : null;
+      // Never frame less than the region itself (see MIN_REGION_HALF_SPAN_DEG);
+      // a region with no located nodes yet frames its area too.
+      for (var code in selectedSet) {
+        var centroid = REGION_CENTROIDS[code];
+        if (!centroid) continue;
+        var latSpan = MIN_REGION_HALF_SPAN_DEG;
+        var lonSpan = MIN_REGION_HALF_SPAN_DEG / Math.cos(centroid[0] * Math.PI / 180);
+        var box = L.latLngBounds([centroid[0] - latSpan, centroid[1] - lonSpan], [centroid[0] + latSpan, centroid[1] + lonSpan]);
+        bounds = bounds ? bounds.extend(box) : box;
+      }
+      if (!bounds) return;
       try {
-        map.fitBounds(L.latLngBounds(finalPts), { padding: [40, 40], maxZoom: 12 });
+        map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 });
       } catch (e) {}
     }
 

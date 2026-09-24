@@ -1153,6 +1153,8 @@ func (db *DB) allRegionMemberships() (map[string]map[string]bool, error) {
 		out[pubkey][iata] = true
 	}
 	return out, rows.Err()
+}
+
 // ObservationRawHexForHash returns the stored wire bytes per observation id for
 // one transmission, keyed by observations.id. Empty when the schema has no
 // observations.raw_hex column (#881 made it optional) or nothing is stored.
