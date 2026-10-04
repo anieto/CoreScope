@@ -2046,7 +2046,8 @@
     // #1323: Known channels (catalogue) section — community-maintained
     // hashtag list, fetched once per page-load from /api/known-channels
     // and rendered with a one-click "Add to my channels" button.
-    sections.push(renderKnownChannelsSection());
+    // MeshTexas: the catalogue leads the sidebar, above My Channels and Network.
+    sections.unshift(renderKnownChannelsSection());
     el.innerHTML = sections.join('');
     bindKnownChannelsHandlers();
 
