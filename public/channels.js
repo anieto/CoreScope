@@ -1878,9 +1878,21 @@
         renderChannelList();
       });
   }
+  // MeshTexas: the catalogue follows the region filter. A selected region
+  // shows its own entries plus entries for every region ("all"); All Regions shows everything.
+  function visibleKnownChannels() {
+    if (!Array.isArray(__knownChannels)) return [];
+    var rp = String(RegionFilter.getRegionParam() || '').toLowerCase();
+    if (!rp || rp === 'all') return __knownChannels;
+    var selected = rp.split(',').map(function (r) { return r.trim(); }).filter(Boolean);
+    return __knownChannels.filter(function (e) {
+      var region = String(e.region || '').toLowerCase();
+      return region === 'all' || selected.indexOf(region) !== -1;
+    });
+  }
   function renderKnownChannelsSection() {
-    var collapsed = localStorage.getItem('ch-known-collapsed') !== 'false';
-    var count = (__knownChannels && Array.isArray(__knownChannels)) ? __knownChannels.length : 0;
+    var collapsed = localStorage.getItem('ch-known-collapsed') === 'true';
+    var count = visibleKnownChannels().length;
     // Lazy-render: if collapsed, emit an empty body — the rows are only
     // built when the user expands (toggle handler populates in place).
     // Avoids burning DOM for a 1000+ entry catalogue that's never seen.
@@ -1909,17 +1921,19 @@
     if (__knownChannelsError) {
       return '<div class="ch-section-empty">Catalogue unavailable</div>';
     }
-    if (__knownChannels.length === 0) {
-      return '<div class="ch-section-empty">No catalogue entries</div>';
+    var visible = visibleKnownChannels();
+    if (visible.length === 0) {
+      return '<div class="ch-section-empty">No catalogue channels for this region</div>';
     }
-    return __knownChannels.map(renderKnownChannelRow).join('');
+    return visible.map(renderKnownChannelRow).join('');
   }
   function renderKnownChannelRow(entry) {
     // entry: {channel, description, region, regionName, key?}
     var chName = String(entry.channel || '').toLowerCase();
     var safeName = chName.replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
     var desc = String(entry.description || '').replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
-    var region = String(entry.region || '').toUpperCase();
+    var region = String(entry.regionName || entry.region || '').replace(/[<>&"]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]; });
+    if (!entry.regionName) region = region.toUpperCase();
     return '' +
       '<div class="ch-channel ch-channel-catalogue" data-known-channel="' + safeName + '">' +
         '<div class="ch-channel-info">' +
@@ -1944,7 +1958,7 @@
         // Toggle in place: flip the body's hidden attr and caret, no
         // full renderChannelList() rebuild. On first expand, populate
         // the body lazily so collapsed catalogues never pay DOM cost.
-        var wasCollapsed = localStorage.getItem('ch-known-collapsed') !== 'false';
+        var wasCollapsed = localStorage.getItem('ch-known-collapsed') === 'true';
         var nowCollapsed = !wasCollapsed;
         try { localStorage.setItem('ch-known-collapsed', nowCollapsed ? 'true' : 'false'); } catch (er) {}
         var body = document.getElementById('chCatalogueBody');
