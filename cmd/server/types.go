@@ -930,6 +930,9 @@ type ChannelResp struct {
 
 type ChannelListResponse struct {
 	Channels []map[string]interface{} `json:"channels"`
+	// ApprovedChannels is set only when channel proposals are on (then
+	// always, [] included); nil keeps the response unchanged when off.
+	ApprovedChannels *[]string `json:"approvedChannels,omitempty"`
 }
 
 type ChannelMessageResp struct {
@@ -1082,7 +1085,19 @@ type ClientConfigResponse struct {
 	MapDarkTileProvider string                 `json:"mapDarkTileProvider,omitempty"` // deprecated. TODO: remove after v3.5.0
 	Customizer          CustomizerClientConfig `json:"customizer"`
 	ClientRxCoverage    bool                   `json:"clientRxCoverage"`
+	ClientRfSamples     bool                   `json:"clientRfSamples"`
 	PathTrust           *PathTrustConfig       `json:"pathTrust,omitempty"`
+	// Present only when user management is on, so the payload is unchanged
+	// for every instance that leaves it off.
+	UserManagement *ClientUserManagement `json:"userManagement,omitempty"`
+}
+
+// ClientUserManagement tells the frontend that accounts exist, and whether
+// channel proposals and node notifications are on.
+type ClientUserManagement struct {
+	Enabled          bool `json:"enabled"`
+	ChannelProposals bool `json:"channelProposals,omitempty"`
+	Notifications    bool `json:"notifications,omitempty"`
 }
 
 // CustomizerClientConfig is the operator-side customizer-modal knobs that

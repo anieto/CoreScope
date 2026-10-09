@@ -104,6 +104,19 @@ function loadInCtx(ctx, file) {
   }
 }
 
+// The real pathHashSize from app.js, for sandboxes that stub app.js piece by
+// piece (loading app.js into them would replace their api/registerPage stubs).
+let _appPathHashSize = null;
+function realPathHashSize() {
+  if (!_appPathHashSize) {
+    const appCtx = makeSandbox();
+    loadInCtx(appCtx, 'public/roles.js');
+    loadInCtx(appCtx, 'public/app.js');
+    _appPathHashSize = appCtx.pathHashSize;
+  }
+  return _appPathHashSize;
+}
+
 // ===== APP.JS TESTS =====
 console.log('\n=== app.js: timeAgo ===');
 {
@@ -234,6 +247,25 @@ console.log('\n=== app.js: routeTypeName / payloadTypeName ===');
   test('getPathLenOffset: transport route (3) → 5', () => assert.strictEqual(ctx.getPathLenOffset(3), 5));
   test('getPathLenOffset: flood route (1) → 1', () => assert.strictEqual(ctx.getPathLenOffset(1), 1));
   test('getPathLenOffset: direct route (2) → 1', () => assert.strictEqual(ctx.getPathLenOffset(2), 1));
+}
+
+console.log('\n=== app.js: pathHashSize ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/app.js');
+
+  // Cases shared with packetpath.HashSize (internal/packetpath/path_test.go,
+  // cmd/server/path_hash_size_agreement_test.go): the two implementations
+  // cannot drift apart without one of the suites failing. 0 = no size.
+  const shared = JSON.parse(fs.readFileSync('test-fixtures/path-hash-size-cases.json', 'utf8')).cases;
+  test('pathHashSize: shared cases file is not empty', () => assert.ok(shared.length > 0));
+  for (const c of shared) {
+    test('pathHashSize: ' + c.name, () => assert.strictEqual(ctx.pathHashSize(c.raw), c.want));
+  }
+  // Inputs only JavaScript can be handed: a message without raw_hex.
+  test('pathHashSize: null → 0', () => assert.strictEqual(ctx.pathHashSize(null), 0));
+  test('pathHashSize: undefined → 0', () => assert.strictEqual(ctx.pathHashSize(undefined), 0));
 }
 
 console.log('\n=== app.js: scopeCellHtml ===');
@@ -2071,6 +2103,51 @@ console.log('\n=== app.js: isTransportRoute + transportBadge ===');
   test('transportBadge(1) returns empty string', () => assert.strictEqual(transportBadge(1), ''));
 }
 
+// #2041: execute the actual IIFE renderer with a test-only export.
+console.log('\n=== Relay airtime advert labels ===');
+{
+  const ctx = makeSandbox();
+  ctx.registerPage = () => {};
+  ctx.getComputedStyle = () => ({ getPropertyValue: () => '' });
+  ctx.esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const source = fs.readFileSync(REPO_ROOT + '/public/analytics.js', 'utf8');
+  vm.runInContext(source.replace("  registerPage('analytics',", "  window.testRelayRenderer = renderRelayAirtimeDumbbell;\n  registerPage('analytics',"), ctx);
+  const render = ctx.window.testRelayRenderer;
+  const rows = [
+    { payload_type: 'ADVERT', type: 4, advert_kind: 'flood', count: 1, count_pct: 20, score: 100, airtime_pct: 33.333 },
+    { payload_type: 'ADVERT', type: 4, advert_kind: 'zero_hop', count: 1, count_pct: 20, score: 0, airtime_pct: 0 },
+    { payload_type: 'ADVERT', type: 4, advert_kind: 'other', count: 1, count_pct: 20, score: 100, airtime_pct: 33.333 },
+    { payload_type: 'ADVERT', type: 4, advert_kind: 'mixed', count: 1, count_pct: 20, score: 100, airtime_pct: 33.333 },
+    { payload_type: 'ACK', type: 3, count: 1, count_pct: 20, score: 0, airtime_pct: 0 },
+  ];
+  test('relay chart labels distinguish all advert kinds and retain zero-score rows', () => {
+    const html = render({ rows, total_score: 300 });
+    for (const label of ['Flood adverts', 'Direct adverts (empty path)', 'Other adverts', 'Mixed adverts', 'ACK']) {
+      assert.ok(html.includes('>' + label + '</div>'), 'missing chart label: ' + label);
+      assert.ok(html.includes('title="' + label + '\n'), 'missing tooltip label: ' + label);
+    }
+    assert.strictEqual((html.match(/class="dumbbell-row"/g) || []).length, 5);
+    assert.ok(html.includes('Known route evidence'), 'classification must not imply complete history');
+    assert.ok(html.includes('Background backfill improves classification automatically'), 'upgrade progress is explained');
+    assert.ok(html.includes('does not prove an original zero-hop send'), 'direct empty paths do not prove origin');
+    assert.ok(html.includes('failed evidence writes may leave gaps'), 'best-effort evidence limitation is explained');
+    assert.ok(html.includes('older overwritten observations cannot be recovered'), 'legacy caveat must remain visible');
+    assert.ok(html.includes('air 0.0%'), 'zero-relay advert share remains visible');
+  });
+  test('relay chart supports legacy payload labels and preserves row input', () => {
+    const legacyRow = { payload_type: 'ADVERT', type: 4, score: 100 };
+    const before = JSON.stringify(legacyRow);
+    const html = render({ rows: [legacyRow], total_score: 100 });
+    assert.ok(html.includes('>ADVERT</div>'));
+    assert.strictEqual(JSON.stringify(legacyRow), before);
+  });
+  test('no relay evidence does not imply all packets were direct', () => {
+    const html = render({ rows: [rows[0]], total_score: 0 });
+    assert.ok(html.includes('No relay activity observed'));
+    assert.ok(!html.includes('all packets direct'), 'flood adverts can have no resolved relays');
+    assert.ok(render({ rows: [] }).includes('No relay-airtime data'));
+  });
+}
 // ===== ANALYTICS.JS: Channel Sort =====
 console.log('\n=== analytics.js: sortChannels ===');
 {
@@ -2654,6 +2731,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     ctx.atob = (s) => Buffer.from(String(s), 'base64').toString('utf8');
 
     ctx.crypto = { subtle: require('crypto').webcrypto.subtle }; ctx.TextEncoder = TextEncoder; ctx.TextDecoder = TextDecoder; ctx.Uint8Array = Uint8Array;
+    ctx.pathHashSize = realPathHashSize();
     loadInCtx(ctx, 'public/channel-decrypt.js');
     loadInCtx(ctx, 'public/channels.js');
     ctx._pageHandlers.init(appEl);
@@ -5649,6 +5727,7 @@ console.log('\n=== packets.js: buildFieldTable transport offsets (#765) ===');
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  ftCtx.pathHashSize = ftCtx.window.pathHashSize = realPathHashSize();
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable, fieldRow } = ftCtx.window._packetsTestAPI;
 
@@ -5739,6 +5818,7 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
   ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
   ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
+  ftCtx.pathHashSize = ftCtx.window.pathHashSize = realPathHashSize();
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 
@@ -5771,13 +5851,14 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
       'Public Key should be at offset 6');
   });
 
-  test('#844: hashCountVal=0 (direct advert) skips Path section', () => {
-    // path_len = 0x00 → hash_size=1, hash_count=0
+  test('#844: hashCountVal=0 skips Path section', () => {
+    // path_len = 0x00 on a FLOOD (header 0x11) → hash_size=1, hash_count=0:
+    // the sender's size is still encoded, there are just no hops to list.
     const raw = '1100' + '0'.repeat(200);
     const pkt = { raw_hex: raw, route_type: 1, payload_type: 0 };
     const html = buildFieldTable(pkt, {}, [], {});
-    assert.ok(!html.includes('section-path'), 'Should not render Path section for direct advert');
-    assert.ok(html.includes('direct advert'), 'Should note direct advert in path_length description');
+    assert.ok(!html.includes('section-path'), 'Should not render Path section with no hops');
+    assert.ok(html.includes('hash_size=1 byte, hash_count=0'), 'a 0-hop flood still encodes its hash size');
   });
 }
 
@@ -6934,6 +7015,115 @@ console.log('\n=== map.js: hash size fallback ===');
   test('map.js does not default an unknown hash_size to 1', () => {
     assert.ok(!/hash_size\s*\|\|\s*1/.test(mapSrc),
       'map.js must go through hashPrefixInfo() — a bare `hash_size || 1` renders "unknown" as a measured 1 byte');
+  });
+}
+
+// ===== Recent advert routing (#2073) =====
+console.log('\n=== roles.js: recent advert groups (#2073) ===');
+{
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/roles.js');
+  function classify(packet) {
+    assert.strictEqual(typeof ctx.classifyRecentAdvert, 'function', 'shared recent-advert classifier must exist');
+    return ctx.classifyRecentAdvert(packet);
+  }
+  test('accumulated mixed evidence wins for the same hash in either arrival order', () => {
+    for (const canonical of [{ route_type: 1, raw_hex: '110000' }, { route_type: 2, raw_hex: '120000' }]) {
+      const advert = { ...canonical, hash: 'same-advert', advert_kind: 'mixed', path_json: '[]' };
+      assert.strictEqual(classify(advert), 'mixed', 'first received frame must not override accumulated evidence');
+      const groups = ctx.groupRecentAdverts([advert]);
+      assert.strictEqual(groups.reduce((n, group) => n + group.adverts.length, 0), 1, 'mixed advert must not be counted twice');
+      const mixed = groups.find(group => group.kind === 'mixed');
+      assert.ok(mixed, 'mixed group must exist');
+      assert.strictEqual(mixed.adverts[0], advert, 'row metadata must be retained');
+      assert.deepStrictEqual(Array.from(groups, group => group.kind), ['flood', 'mixed', 'zero-hop']);
+      assert.strictEqual(mixed.label, 'Mixed flood / direct (empty path) adverts');
+    }
+  });
+  test('authoritative advert kind does not depend on canonical route or path', () => {
+    for (const [advert_kind, expected] of [['flood', 'flood'], ['zero_hop', 'zero-hop'], ['mixed', 'mixed'], ['other', 'other']]) {
+      assert.strictEqual(classify({ advert_kind }), expected);
+      assert.strictEqual(classify({ advert_kind, route_type: 1, raw_hex: '110000', path_json: '[]' }), expected);
+      assert.strictEqual(classify({ advert_kind, route_type: 2, raw_hex: '120000', path_json: '["ab"]' }), expected);
+    }
+  });
+  test('legacy and unrecognized advert evidence stays unknown despite known-looking frames', () => {
+    for (const advert_kind of [undefined, null, '', 'zero-hop', 'future_kind', 1, false, ['flood']]) {
+      for (const canonical of [{ route_type: 1, raw_hex: '110000' }, { route_type: 2, raw_hex: '120000' }]) {
+        assert.strictEqual(classify({ ...canonical, advert_kind, path_json: '[]', observations: [{ raw_hex: '110000' }, { raw_hex: '120000' }] }), 'other');
+      }
+    }
+  });
+  test('mixed groups preserve per-group order and hide only empty optional groups', () => {
+    const adverts = ['mixed', 'zero_hop', 'flood', 'mixed', 'other'].map((advert_kind, i) => ({ advert_kind, hash: String(i) }));
+    const before = JSON.stringify(adverts);
+    const groups = ctx.groupRecentAdverts(adverts);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(groups.map(group => [group.kind, group.adverts.map(advert => advert.hash)]))), [
+      ['flood', ['2']], ['mixed', ['0', '3']], ['zero-hop', ['1']], ['other', ['4']],
+    ]);
+    assert.strictEqual(groups.reduce((n, group) => n + group.adverts.length, 0), adverts.length);
+    assert.strictEqual(JSON.stringify(adverts), before);
+    assert.deepStrictEqual(Array.from(ctx.groupRecentAdverts([]), group => group.kind), ['flood', 'zero-hop']);
+  });
+  test('legacy flood routes without accumulated evidence stay unknown', () => {
+    for (const route of [0, 1, '0', '1']) {
+      assert.strictEqual(classify({ route_type: route, path_json: '[]' }), 'other');
+    }
+    assert.strictEqual(classify({ raw_hex: '110000' }), 'other');
+    assert.strictEqual(classify({ raw_hex: '10010203040000' }), 'other');
+  });
+  test('legacy direct routes cannot prove zero-hop from a selected empty path', () => {
+    for (const route of [2, 3, '2', '3']) {
+      assert.strictEqual(classify({ route_type: route, path_json: '[]' }), 'other');
+      assert.strictEqual(classify({ route_type: route, path_json: [] }), 'other');
+      assert.strictEqual(classify({ route_type: route }), 'other');
+      assert.strictEqual(classify({ route_type: route, path_json: '["ab"]' }), 'other');
+    }
+    assert.strictEqual(classify({ route_type: null, raw_hex: '120000' }), 'other');
+    assert.strictEqual(classify({ raw_hex: '13010203040000' }), 'other');
+  });
+  test('neither canonical transmission nor selected observation path fills missing evidence', () => {
+    assert.strictEqual(classify({ route_type: 2, raw_hex: '1201ab00', path_json: '[]' }), 'other');
+    assert.strictEqual(classify({ route_type: 2, raw_hex: '120000', path_json: '["ab"]' }), 'other');
+    assert.strictEqual(classify({ route_type: 3, raw_hex: '130002030401ab00', path_json: '[]' }), 'other');
+    assert.strictEqual(classify({ route_type: 1, raw_hex: '114000' }), 'other');
+    assert.strictEqual(classify({ route_type: 2, raw_hex: '124000' }), 'other');
+  });
+  test('unknown, malformed and contradictory routing is never guessed', () => {
+    for (const packet of [null, {}, { route_type: null }, { route_type: '' },
+      { route_type: false }, { route_type: [] }, { route_type: [2], path_json: '[]' },
+      { route_type: {} }, { route_type: 4 }, { route_type: -1 }, { route_type: 2.5 },
+      { route_type: 'flood' }, { route_type: 2, path_json: null },
+      { route_type: 2, path_json: '' }, { route_type: 2, path_json: 'null' },
+      { route_type: 2, path_json: '{}' }, { route_type: 2, path_json: '[' },
+      { route_type: 1, raw_hex: '120000' }, { route_type: 2, raw_hex: '110000' },
+      { route_type: 2, raw_hex: '12' }, { route_type: 2, raw_hex: '120' },
+      { route_type: 2, raw_hex: '1200zz' }, { route_type: 2, raw_hex: '12c000' },
+      { route_type: 2, raw_hex: '1202ab' }, { route_type: 3, raw_hex: '130000' }]) {
+      assert.strictEqual(classify(packet), 'other', JSON.stringify(packet));
+    }
+  });
+  test('grouping preserves every row, per-group order and sample counts without mutation', () => {
+    assert.strictEqual(typeof ctx.groupRecentAdverts, 'function', 'shared recent-advert grouping must exist');
+    const packets = [
+      { hash: 'a', advert_kind: 'zero_hop', route_type: 2, path_json: '[]' },
+      { hash: 'b', advert_kind: 'flood', route_type: 1 },
+      { hash: 'c', route_type: null },
+      { hash: 'd', advert_kind: 'flood', route_type: 0 },
+      { hash: 'e', advert_kind: 'zero_hop', route_type: 3, path_json: '[]' },
+      { hash: 'f', route_type: 2, path_json: '["ab"]' },
+    ];
+    const before = JSON.stringify(packets);
+    const groups = ctx.groupRecentAdverts(packets);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(groups.map(g => [g.kind, g.label, g.adverts.map(p => p.hash)]))), [
+      ['flood', 'Flood adverts', ['b', 'd']],
+      ['zero-hop', 'Direct adverts (empty path)', ['a', 'e']],
+      ['other', 'Other / unknown adverts', ['c', 'f']],
+    ]);
+    assert.strictEqual(groups.reduce((n, g) => n + g.adverts.length, 0), packets.length);
+    assert.strictEqual(groups[0].adverts[0], packets[1]);
+    assert.strictEqual(JSON.stringify(packets), before);
+    assert.strictEqual(ctx.groupRecentAdverts([]).reduce((n, g) => n + g.adverts.length, 0), 0);
   });
 }
 

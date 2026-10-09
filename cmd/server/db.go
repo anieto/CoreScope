@@ -17,6 +17,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/geofilter"
+	"github.com/meshcore-analyzer/packetpath"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -37,6 +38,8 @@ const routeTypeNonTransportSQL = "route_type IN (1, 2)"
 
 // DB wraps a read-only connection to the MeshCore SQLite database.
 type DB struct {
+	advertEvidenceTable     atomic.Bool
+	advertEvidenceReadHook  func() // test-only: immediately before a bulk mask query
 	conn                    *sql.DB
 	path                    string // filesystem path to the database file
 	isV3                    bool   // v3 schema: observer_idx in observations (vs observer_id in v2)
@@ -84,21 +87,6 @@ type DB struct {
 	msgCacheMu sync.Mutex
 	msgCache   map[string]channelMessagesCacheEntry
 
-	// Region membership cache (perf): pubkey -> set of IATA codes it has
-	// been observed transmitting ADVERT packets from. GetNodes previously
-	// ran a live JOIN across transmissions/observations/observers per
-	// request, filtered to the requested codes — cheap-looking but a full
-	// scan of the join regardless of selectivity, repeated for every
-	// distinct region combination a client requested (observed 9-17s on
-	// a modest dataset). Computed once per TTL window covering every
-	// region, so a request becomes a map lookup instead of a fresh scan.
-	regionMembershipMu    sync.Mutex
-	regionMembershipCache map[string]map[string]bool
-	regionMembershipAt    time.Time
-	// Collapses the TTL-boundary herd so the scan runs once, not once per
-	// in-flight request, and never under regionMembershipMu.
-	regionMembershipSF singleflight.Group
-
 	// Prepared statements for frequently-called queries.
 	// Prepared once at initDB time, reused across all requests.
 	stmtCountTransmissions  *sql.Stmt
@@ -128,11 +116,6 @@ const msgCacheTTL = 10 * time.Second
 // maxCacheEntries bounds a keyed cache's size. Region/pagination keys are
 // low-cardinality in practice; this is a defensive reset, not a real LRU.
 const maxCacheEntries = 256
-
-// regionMembershipTTL matches declaredRegionsTTL's cadence (scope_config_state.go)
-// — region membership from ADVERT history is a slow-moving signal, not a
-// real-time one.
-const regionMembershipTTL = 30 * time.Second
 
 type channelsCacheEntry struct {
 	res []map[string]interface{}
@@ -1077,84 +1060,6 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 	return obsByTx[txID]
 }
 
-// regionMembership returns the cached pubkey -> observed-IATA-code-set map,
-// recomputing it via a single full scan on a TTL miss. Concurrent misses
-// are collapsed by singleflight so the scan runs once, not once per
-// in-flight request (same idiom as declaredRegionsCSV, scope_config_state.go).
-func (db *DB) regionMembership() (map[string]map[string]bool, error) {
-	db.regionMembershipMu.Lock()
-	cached, at := db.regionMembershipCache, db.regionMembershipAt
-	db.regionMembershipMu.Unlock()
-	if cached != nil && time.Since(at) < regionMembershipTTL {
-		return cached, nil
-	}
-
-	v, err, _ := db.regionMembershipSF.Do("region-membership", func() (interface{}, error) {
-		// Double-check inside the flight: a previous winner may have stored a
-		// fresh map between this caller's read above and its arrival here.
-		db.regionMembershipMu.Lock()
-		fresh, freshAt := db.regionMembershipCache, db.regionMembershipAt
-		db.regionMembershipMu.Unlock()
-		if fresh != nil && time.Since(freshAt) < regionMembershipTTL {
-			return fresh, nil
-		}
-
-		m, qerr := db.allRegionMemberships()
-		if qerr != nil {
-			return nil, qerr
-		}
-		db.regionMembershipMu.Lock()
-		db.regionMembershipCache = m
-		db.regionMembershipAt = time.Now()
-		db.regionMembershipMu.Unlock()
-		return m, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.(map[string]map[string]bool), nil
-}
-
-// allRegionMemberships runs the pubkey -> observed-IATA-codes scan once,
-// covering every region in a single pass rather than the previous
-// per-request query which re-ran the same JOIN filtered to only the
-// requested codes — a full scan of the join regardless of selectivity.
-// Pubkey casing matches from_pubkey exactly as stored (#1143), consistent
-// with the direct `public_key IN (SELECT ... from_pubkey)` equality the
-// old inline subquery relied on.
-func (db *DB) allRegionMemberships() (map[string]map[string]bool, error) {
-	joinCond := "obs.rowid = o.observer_idx"
-	if !db.isV3 {
-		joinCond = "obs.id = o.observer_id"
-	}
-	query := fmt.Sprintf(`
-		SELECT DISTINCT t.from_pubkey, UPPER(TRIM(obs.iata))
-		FROM transmissions t
-		JOIN observations o ON o.transmission_id = t.id
-		JOIN observers obs ON %s
-		WHERE t.payload_type = 4
-		AND obs.iata IS NOT NULL AND TRIM(obs.iata) != ''
-	`, joinCond)
-	rows, err := db.conn.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make(map[string]map[string]bool)
-	for rows.Next() {
-		var pubkey, iata string
-		if err := rows.Scan(&pubkey, &iata); err != nil {
-			continue
-		}
-		if out[pubkey] == nil {
-			out[pubkey] = make(map[string]bool)
-		}
-		out[pubkey][iata] = true
-	}
-	return out, rows.Err()
-}
-
 // ObservationRawHexForHash returns the stored wire bytes per observation id for
 // one transmission, keyed by observations.id. Empty when the schema has no
 // observations.raw_hex column (#881 made it optional) or nothing is stored.
@@ -1205,8 +1110,29 @@ func (db *DB) ObservationRawHexForHash(hash string) map[int]string {
 	return out
 }
 
+// NodeQuery selects and orders nodes for GetNodes. Region filters by the SQL
+// subquery over adverts and observers; RegionPubkeys, when non-nil, is that
+// filter already resolved to a set of node pubkeys (#2101, see
+// PacketStore.RegionNodePubkeys) and takes its place. An empty, non-nil
+// RegionPubkeys matches no node.
+type NodeQuery struct {
+	Limit, Offset int
+	Role          string
+	Search        string
+	Before        string
+	LastHeard     string
+	SortBy        string
+	Region        string
+	RegionPubkeys []string
+}
+
 // GetNodes returns filtered, paginated node list.
-func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortBy, region string) ([]map[string]interface{}, int, map[string]int, error) {
+func (db *DB) GetNodes(nq NodeQuery) ([]map[string]interface{}, int, map[string]int, error) {
+	limit, offset := nq.Limit, nq.Offset
+	role, search, before, lastHeard, sortBy, region := nq.Role, nq.Search, nq.Before, nq.LastHeard, nq.SortBy, nq.Region
+	if nq.RegionPubkeys != nil {
+		region = ""
+	}
 	var where []string
 	var args []interface{}
 
@@ -1237,40 +1163,44 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 	if region != "" {
 		codes := normalizeRegionCodes(region)
 		if len(codes) > 0 {
-			// Perf: was a live JOIN across transmissions/observations/observers
-			// per request (observed 9-17s under real load) — now a lookup
-			// against a periodically-refreshed snapshot. See regionMembership.
-			membership, mErr := db.regionMembership()
-			if mErr != nil {
-				log.Printf("[nodes] region membership lookup failed, region filter matches nothing: %v", mErr)
-				where = append(where, "1 = 0")
-			} else {
-				codeSet := make(map[string]bool, len(codes))
-				for _, c := range codes {
-					codeSet[c] = true
-				}
-				var pubkeys []string
-				for pk, regions := range membership {
-					for r := range regions {
-						if codeSet[r] {
-							pubkeys = append(pubkeys, pk)
-							break
-						}
-					}
-				}
-				if len(pubkeys) == 0 {
-					where = append(where, "1 = 0")
-				} else {
-					placeholders := make([]string, len(pubkeys))
-					pkArgs := make([]interface{}, len(pubkeys))
-					for i, pk := range pubkeys {
-						placeholders[i] = "?"
-						pkArgs[i] = pk
-					}
-					where = append(where, fmt.Sprintf("public_key IN (%s)", strings.Join(placeholders, ",")))
-					args = append(args, pkArgs...)
-				}
+			placeholders := make([]string, len(codes))
+			regionArgs := make([]interface{}, len(codes))
+			for i, c := range codes {
+				placeholders[i] = "?"
+				regionArgs[i] = c
 			}
+			joinCond := "obs.rowid = o.observer_idx"
+			if !db.isV3 {
+				joinCond = "obs.id = o.observer_id"
+			}
+			// #1143: from_pubkey is a dedicated, indexed column populated at
+			// ingest (and backfilled) for ADVERT rows specifically so pubkey
+			// lookups don't need to JSON_EXTRACT + parse decoded_json per row.
+			subq := fmt.Sprintf(`public_key IN (
+				SELECT DISTINCT t.from_pubkey
+				FROM transmissions t
+				JOIN observations o ON o.transmission_id = t.id
+				JOIN observers obs ON %s
+				WHERE t.payload_type = 4
+				AND UPPER(TRIM(obs.iata)) IN (%s)
+			)`, joinCond, strings.Join(placeholders, ","))
+			where = append(where, subq)
+			args = append(args, regionArgs...)
+		}
+	}
+	if nq.RegionPubkeys != nil {
+		if len(nq.RegionPubkeys) == 0 {
+			where = append(where, "0")
+		} else {
+			// One JSON parameter rather than one placeholder per key: a region
+			// can hold thousands of nodes, and the IN list stays a primary-key
+			// lookup.
+			keysJSON, err := json.Marshal(nq.RegionPubkeys)
+			if err != nil {
+				return nil, 0, nil, err
+			}
+			where = append(where, "public_key IN (SELECT value FROM json_each(?))")
+			args = append(args, string(keysJSON))
 		}
 	}
 
@@ -1435,6 +1365,20 @@ func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int) ([]map[str
 				txIDs = append(txIDs, id)
 			}
 			packets = append(packets, p)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	masks, err := db.advertEvidenceForIDs(txIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range packets {
+		if p["payload_type"] == 4 {
+			p["advert_kind"] = packetpath.AdvertKind(masks[p["id"].(int)])
 		}
 	}
 
@@ -2334,9 +2278,11 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	if db.hasScopeName {
 		scopeNameCol = ", t.scope_name"
 	}
+	// substr(t.raw_hex, 1, 12): packetpath.HashSize only reads the header,
+	// transport codes and path byte (6 bytes), not the whole packet.
 	var obsSQL string
 	if db.isV3 {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				obs.id, obs.name, o.snr, o.path_json, o.timestamp` + scopeNameCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -2344,7 +2290,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
 			ORDER BY o.id ASC`
 	} else {
-		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
+		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen, substr(t.raw_hex, 1, 12),
 				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp` + scopeNameCol + `
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
@@ -2367,11 +2313,11 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 
 	for rows.Next() {
 		var pktID, txID int
-		var pktHash, dj, fs, obsID, obsName, pathJSON sql.NullString
+		var pktHash, dj, fs, rawHexHead, obsID, obsName, pathJSON sql.NullString
 		var snr sql.NullFloat64
 		var obsTs sql.NullInt64
 		var scopeName sql.NullString
-		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs}
+		scanArgs := []interface{}{&pktID, &txID, &pktHash, &dj, &fs, &rawHexHead, &obsID, &obsName, &snr, &pathJSON, &obsTs}
 		if db.hasScopeName {
 			scanArgs = append(scanArgs, &scopeName)
 		}
@@ -2427,6 +2373,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				"hops":             hops,
 				"snr":              nullFloat(snr),
 				"scope_name":       nullStr(scopeName),
+				"path_hash_size":   packetpath.HashSize(rawHexHead.String),
 			},
 			Repeats: 1,
 		}

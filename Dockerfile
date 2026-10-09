@@ -65,6 +65,9 @@ COPY internal/prunequeue/ ../../internal/prunequeue/
 COPY internal/perfio/ ../../internal/perfio/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/lora/ ../../internal/lora/
+COPY internal/users/ ../../internal/users/
+COPY internal/channel/ ../../internal/channel/
+COPY internal/mailer/ ../../internal/mailer/
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/tmp/zig-cache \
@@ -81,6 +84,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Build ingestor
 WORKDIR /build/ingestor
 COPY cmd/ingestor/go.mod cmd/ingestor/go.sum ./
+COPY internal/channel/ ../../internal/channel/
 COPY internal/geofilter/ ../../internal/geofilter/
 COPY internal/sigvalidate/ ../../internal/sigvalidate/
 COPY internal/packetpath/ ../../internal/packetpath/

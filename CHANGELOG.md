@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [3.14.0] - 2026-10-08
+
+See [docs/release-notes/v3.14.0.md](docs/release-notes/v3.14.0.md) for the full notes. 23 commits since v3.13.1: 13 fix, 8 feat, 1 ci, 1 docs.
+
+### Highlights
+- **Optional user accounts, off by default** (#2129, #2130, #2138 to #2141) - accounts and roles, settings sync across devices, an admin area with an audit log, hashtag channel proposals with admin approval, mail notifications for watched nodes, data export and daily `users.db` backups. Setup: `docs/user-guide/accounts.md`.
+- **New limits on unauthenticated endpoints** (#2119, #2120, #2122, #2123, #2127) - requests above them now get 400 or 429 instead of an answer. **Operator awareness required** for API clients that send long `nodes=` lists.
+- **`traffic_share_score` drops after the upgrade and no longer drifts with uptime** (#2117).
+- **Regional `/api/nodes` queries no longer exhaust the database pool** (#2114, #2115) - 154.8 s to 37 ms for an uncached region set.
+
+No manual migration step. With user management off, no new file or table is created.
+
+## [3.13.1] - 2026-10-04
+
+See [docs/release-notes/v3.13.1.md](docs/release-notes/v3.13.1.md) for the full notes. 1 commit since v3.13.0: 1 fix.
+
+### Highlights
+- **Node-discover replies count as coverage** (#2111) - a CoreDrive RX companion's discover replies were dropped from `client_receptions`, so the coverage page showed nothing for them. On a deployment that has had the fix since August they are 44% of coverage rows over 7 days. Replies received before the upgrade are not recovered.
+
+No manual migration step, no configuration change.
+
+## [3.13.0] - 2026-10-04
+
+See [docs/release-notes/v3.13.0.md](docs/release-notes/v3.13.0.md) for the full notes. 16 commits since v3.12.0: 10 fix, 4 test, 2 feat.
+
+### Highlights
+- **The first start backfills advert route evidence in the background, and flood counts read low until it finishes** (#2088) - measured at 24m 1s on 16.8M observations and 36m 23s on 16.5M on a busier host. Startup and ingest do not wait for it. Runs once per database and resumes after a restart. **Operator awareness required.**
+- **Adverts are split by the route they arrived on** (#2088, #2085) - flood, direct with an empty path, or mixed, in Analytics and on node detail.
+- **Path hops are resolved with the observer that heard them** (#2099) - with one per-path warning in the packets list when hops stay ambiguous.
+- **A compact packets table with a Full Names toggle** (#2090).
+- **Channel unread counts and key-only channels survive a list refresh** (#2096).
+
+No manual migration step: `advert_route_evidence` is created at boot.
+
 ## [3.12.0] - 2026-09-26
 
 See [docs/release-notes/v3.12.0.md](docs/release-notes/v3.12.0.md) for the full notes. 29 commits since v3.11.0: 15 fix, 5 test, 3 perf, 3 feat, 2 ci, 1 chore.

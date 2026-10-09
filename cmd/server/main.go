@@ -367,6 +367,11 @@ func main() {
 	srv := NewServer(database, cfg, hub)
 	srv.configDir = configDir
 	srv.store = store
+	// Optional user management (off by default). Fails startup on a bad
+	// config rather than running with registration that cannot work.
+	if err := srv.initUserManagement(resolvedDB); err != nil {
+		log.Fatalf("[users] %v", err)
+	}
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
 
@@ -419,31 +424,6 @@ func main() {
 	srv.startNeighborGraphRecomputer(ngInterval, stopNeighborGraphCache)
 	defer close(stopNeighborGraphCache)
 	log.Printf("[neighbor-graph-cache] background recompute enabled (interval=%s)", ngInterval)
-
-	// Region-membership snapshot (GetNodes' region filter — backs the live
-	// map's region-filtered node list and region-filtered VCR replay/scrub).
-	// Was purely lazy: a request landing right after the 30s TTL lapsed paid
-	// the full live scan itself (measured ~10s on this dataset). regionMembership()
-	// already caches + singleflights that scan, so calling it proactively on a
-	// timer just under the TTL keeps the cache warm — the lazy path in
-	// regionMembership() is unchanged and still covers cold-start/failure cases.
-	stopRegionMembership := make(chan struct{})
-	regionMembershipRecomputeInterval := regionMembershipTTL - 5*time.Second
-	go func() {
-		database.regionMembership()
-		t := time.NewTicker(regionMembershipRecomputeInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-t.C:
-				database.regionMembership()
-			case <-stopRegionMembership:
-				return
-			}
-		}
-	}()
-	defer close(stopRegionMembership)
-	log.Printf("[region-membership] background recompute enabled (interval=%s)", regionMembershipRecomputeInterval)
 
 	// Known-channels catalogue cache (issue #1323). OPT-IN: an empty
 	// cfg.KnownChannelsURL leaves srv.knownChannels nil and starts no
@@ -568,6 +548,9 @@ func main() {
 
 		// 3. Close WebSocket hub
 		hub.Close()
+
+		// 3b. Close users.db (user management, opt-in; no-op when off).
+		srv.closeUserManagement()
 
 		// 4. Close database (release SQLite WAL lock)
 		if err := dbClose(); err != nil {

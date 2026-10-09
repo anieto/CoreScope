@@ -588,6 +588,7 @@
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
     window.MC_CLIENT_RX_COVERAGE = cfg.clientRxCoverage === true;
+    window.MC_CLIENT_RF_SAMPLES = cfg.clientRfSamples === true;
     // Coverage is opt-in: the nav link is NOT in static HTML (so the default-off
     // nav matches upstream and the nav-overflow tests). Inject it after Analytics
     // only when enabled, then nudge applyNavPriority (it re-runs on 'resize').
@@ -658,6 +659,8 @@
     window.MC_CUSTOMIZER_CFG = (cfg.customizer && typeof cfg.customizer === 'object')
       ? { disabledTabs: Array.isArray(cfg.customizer.disabledTabs) ? cfg.customizer.disabledTabs : [] }
       : { disabledTabs: [] };
+    // Optional user management: present only when the server enables it.
+    window.MC_USER_MGMT = (cfg.userManagement && cfg.userManagement.enabled) ? { enabled: true, channelProposals: !!cfg.userManagement.channelProposals, notifications: !!cfg.userManagement.notifications } : null;
     // #1574 — operator-configurable cap on /live map node count.
     if (cfg.liveMapMaxNodes != null) window.LIVE_MAP_MAX_NODES = cfg.liveMapMaxNodes;
     // #1784 — path trust threshold: minimum hash bytes for mapping evidence.
@@ -983,6 +986,29 @@
       bytes: bytes,
       prefix: pk ? pk.slice(0, bytes * 2).toUpperCase() : '??',
     };
+  };
+
+  // The API accumulates route evidence across observations of the same advert.
+  // A canonical frame or selected observation cannot prove an exclusive kind.
+  window.classifyRecentAdvert = function (advert) {
+    var kind = advert && advert.advert_kind;
+    if (kind === 'flood' || kind === 'mixed') return kind;
+    return kind === 'zero_hop' ? 'zero-hop' : 'other';
+  };
+
+  // One pass over the API's bounded recent sample; keep input order and rows intact.
+  window.groupRecentAdverts = function (adverts) {
+    var groups = [
+      { kind: 'flood', label: 'Flood adverts', adverts: [] },
+      { kind: 'mixed', label: 'Mixed flood / direct (empty path) adverts', adverts: [] },
+      { kind: 'zero-hop', label: 'Direct adverts (empty path)', adverts: [] },
+      { kind: 'other', label: 'Other / unknown adverts', adverts: [] },
+    ];
+    adverts.forEach(function (advert) {
+      var kind = window.classifyRecentAdvert(advert);
+      groups[kind === 'flood' ? 0 : kind === 'mixed' ? 1 : kind === 'zero-hop' ? 2 : 3].adverts.push(advert);
+    });
+    return groups.filter(function (group) { return group.kind === 'flood' || group.kind === 'zero-hop' || group.adverts.length; });
   };
 
   /** Render a skew sparkline SVG (inline, word-sized) */

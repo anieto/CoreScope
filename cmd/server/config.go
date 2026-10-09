@@ -173,6 +173,25 @@ type Config struct {
 	// ⇒ off; see ClientRxCoverageEnabled.
 	ClientRxCoverage *ClientRxCoverageConfig `json:"clientRxCoverage,omitempty"`
 
+	// ClientRfSamples gates the opt-in RF environment sample stream (companion
+	// radio noise-floor/counters paired with GPS, table client_rf_samples).
+	// This is the same flag cmd/ingestor checks before recording samples;
+	// mirrored here so the server can gate reading them back. Absent/nil ⇒
+	// off; see ClientRfSamplesEnabled.
+	ClientRfSamples *ClientRfSamplesConfig `json:"clientRfSamples,omitempty"`
+
+	// UserManagement gates optional accounts
+	// (docs/specs/2026-10-06-user-management-design.md). Absent/nil means off;
+	// see UserManagementEnabled.
+	UserManagement *UserManagementConfig `json:"userManagement,omitempty"`
+
+	// HashChannels and ChannelKeys are the ingestor's channel configuration,
+	// read here for the names only: a channel proposal for a configured name
+	// is refused (see configuredChannelNames). ChannelKeys drops the key
+	// values while unmarshalling, so the server never holds key material.
+	HashChannels []string        `json:"hashChannels,omitempty"`
+	ChannelKeys  channelKeyNames `json:"channelKeys,omitempty"`
+
 	ResolvedPath  *ResolvedPathConfig  `json:"resolvedPath,omitempty"`
 	NeighborGraph *NeighborGraphConfig `json:"neighborGraph,omitempty"`
 
@@ -271,6 +290,20 @@ type ClientRxCoverageConfig struct {
 // feature is on. Nil config or absent/nil section ⇒ off (the safe default).
 func (c *Config) ClientRxCoverageEnabled() bool {
 	return c != nil && c.ClientRxCoverage != nil && c.ClientRxCoverage.Enabled
+}
+
+// ClientRfSamplesConfig gates the opt-in RF environment sample stream.
+// Mirrors cmd/ingestor's ClientRfSamplesConfig (same JSON section, read by
+// both binaries from the same config.json).
+type ClientRfSamplesConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ClientRfSamplesEnabled reports whether the opt-in RF environment sample
+// stream is on. Nil config or absent/nil section ⇒ off (the safe default),
+// mirroring ClientRxCoverageEnabled.
+func (c *Config) ClientRfSamplesEnabled() bool {
+	return c != nil && c.ClientRfSamples != nil && c.ClientRfSamples.Enabled
 }
 
 // WSCompressionEnabled returns true when WebSocket permessage-deflate is explicitly enabled.
@@ -970,9 +1003,15 @@ func SaveGeoFilter(configDir string, gf *GeoFilterConfig) error {
 	}
 	out = append(out, '\n')
 
-	// Atomic write: temp file + rename.
+	// Atomic write: temp file + rename. Keep the original file's mode:
+	// config.json holds the API key and broker passwords, and an operator
+	// who made it 0600 should not find it 0644 after a geo-filter save.
+	mode := os.FileMode(0644)
+	if fi, err := os.Stat(configPath); err == nil {
+		mode = fi.Mode().Perm()
+	}
 	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0644); err != nil {
+	if err := os.WriteFile(tmp, out, mode); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	if err := os.Rename(tmp, configPath); err != nil {
@@ -1074,4 +1113,55 @@ func (c *Config) AnalyticsRecomputeIntervals() AnalyticsRecomputeIntervals {
 	out.ObserversClockSkew = get("observersClockSkew")
 	out.NodesClockSkew = get("nodesClockSkew")
 	return out
+}
+
+// channelKeyNames is config.json channelKeys ({name: hexKey}) reduced to the
+// names; the key values are discarded during unmarshalling. A value that is
+// not an object is ignored with a log line instead of failing: LoadConfig
+// falls back to pure defaults on any parse error, and this field must not
+// change config loading for deployments without channel proposals.
+type channelKeyNames []string
+
+func (n *channelKeyNames) UnmarshalJSON(b []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		log.Printf("[config] channelKeys is not an object; ignoring it for channel-proposal checks")
+		*n = nil
+		return nil
+	}
+	names := make(channelKeyNames, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	*n = names
+	return nil
+}
+
+// configuredChannelNames is the set of channel names the ingestor already
+// decrypts from config.json, normalised as cmd/ingestor's loadChannelKeys
+// does: hashChannels trimmed and prefixed with '#', channelKeys names as
+// written except the well-known casing fix (public becomes Public).
+// Case-sensitive, like the ingestor's key map.
+func (c *Config) configuredChannelNames() map[string]bool {
+	names := map[string]bool{}
+	if c == nil {
+		return names
+	}
+	for _, raw := range c.HashChannels {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, "#") {
+			name = "#" + name
+		}
+		names[name] = true
+	}
+	for _, name := range c.ChannelKeys {
+		if strings.EqualFold(name, "public") {
+			name = "Public"
+		}
+		names[name] = true
+	}
+	return names
 }

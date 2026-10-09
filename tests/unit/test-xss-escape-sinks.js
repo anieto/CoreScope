@@ -193,11 +193,23 @@ test('observers.js renderRow: observer name cell escapes o.name', () => {
   assertNoXss(html, 'observers.js obs name cell');
 });
 
+// The observer name reaches the packets table through obsCellName(), which
+// shortens it (unless the Full Names toggle is on) and escapes it. Build the
+// REAL helper from packets.js source so a regression in either the template
+// or the helper turns these tests red.
+function loadObsCellName(nameFn, fullNames) {
+  const src = fs.readFileSync('public/packets.js', 'utf8');
+  const m = src.match(/function obsCellName\(id, maxLen\) \{[\s\S]*?\n  \}/);
+  assert.ok(m, 'packets.js obsCellName helper not found');
+  return new Function('escapeHtml', 'truncate', 'obsNameOnly', 'showFullNames',
+    m[0] + '; return obsCellName;')(
+    escapeHtml, (s, n) => String(s).slice(0, n), nameFn, fullNames);
+}
+
 // --- 5. public/packets.js observer cell (grouped header — isSingle path) --
 test('packets.js: grouped observer cell escapes observer name', () => {
-  // Capture the isSingle ternary on the grouped header row.
-  // Master form: `${isSingle ? truncate(obsNameOnly(headerObserverId), 16) + obsIataBadge(p) : ...}`
-  // Fixed form:  `${isSingle ? escapeHtml(truncate(obsNameOnly(headerObserverId), 16)) + obsIataBadge(p) : ...}`
+  // Capture the isSingle ternary on the grouped header row:
+  // `${isSingle ? obsCellName(headerObserverId, 16) + obsIataBadge(p) : ...}`
   const src = fs.readFileSync('public/packets.js', 'utf8');
   const m = src.match(
     /(<td class="col-observer"[^`]*?headerObserverId[^`]*?groupedObserverIataBadgesHtml\(p\)\}<\/td>)/
@@ -205,51 +217,56 @@ test('packets.js: grouped observer cell escapes observer name', () => {
   assert.ok(m, 'packets.js grouped observer cell template not found');
   const tpl = '`' + m[1] + '`';
   const fn = new Function(
-    'isSingle','headerObserverId','escapeHtml','truncate','obsNameOnly',
+    'isSingle','headerObserverId','escapeHtml','obsCellName','obsNameOnly',
     'obsIataBadge','groupedObserverIataBadgesHtml','p',
     'return ' + tpl + ';'
   );
-  const html = fn(
-    true, 'obs-1', escapeHtml,
-    (s, n) => String(s).slice(0, n),
-    () => TAG_PAYLOAD + ATTR_PAYLOAD,
-    () => '', () => '', {}
-  );
-  assertNoXss(html, 'packets.js grouped observer cell');
+  const name = () => TAG_PAYLOAD + ATTR_PAYLOAD;
+  // Full Names on: the whole payload reaches the cell.
+  for (const isSingle of [true, false]) {
+    const html = fn(isSingle, 'obs-1', escapeHtml, loadObsCellName(name, true), name,
+      () => '', () => '', {});
+    assertNoXss(html, 'packets.js grouped observer cell (full names, isSingle=' + isSingle + ')');
+  }
+  // Shortened: a 10-char payload survives the 10/16-char cut intact.
+  const short = () => "'<img on=x";
+  const html = fn(false, 'obs-1', escapeHtml, loadObsCellName(short, false), short,
+    () => '', () => '', {});
+  assert.ok(!/<img/.test(html), 'packets.js grouped cell: raw <img survived: ' + html);
+  assert.ok(html.includes('&lt;img') && html.includes('&#39;'),
+    'packets.js grouped cell: escaped markers missing: ' + html);
 });
 
 // --- 6. public/packets.js child / flat observer cells --------------------
 test('packets.js: flat observer cell escapes observer name', () => {
-  // Capture the flat observer cell — the OUTER form, with or without
-  // escapeHtml: `${truncate(obsNameOnly(p.observer_id), 16)}${obsIataBadge(p)}`
-  // or            `${escapeHtml(truncate(obsNameOnly(p.observer_id), 16))}${obsIataBadge(p)}`.
+  // Capture the flat observer cell: `${obsCellName(p.observer_id, 16)}${obsIataBadge(p)}`.
   const src = fs.readFileSync('public/packets.js', 'utf8');
-  // Find the FLAT row (the third occurrence with p.observer_id, not c.observer_id).
-  const re = /\$\{(?:escapeHtml\()?truncate\(obsNameOnly\(p\.observer_id\),\s*16\)\)?\}\$\{obsIataBadge\(p\)\}/;
+  const re = /\$\{obsCellName\(p\.observer_id,\s*16\)\}\$\{obsIataBadge\(p\)\}/;
   const m = src.match(re);
   assert.ok(m, 'packets.js flat observer cell template not found');
   const tpl = '`<td>' + m[0] + '</td>`';
   const fn = new Function(
-    'p','escapeHtml','truncate','obsNameOnly','obsIataBadge',
+    'p','obsCellName','obsIataBadge',
     'return ' + tpl + ';'
   );
-  // Use short payloads — truncate(_, 16) would lop off the trailing single
-  // quote of a longer string. Both must survive in the first 16 chars.
-  const html = fn(
-    { observer_id: 'obs-1' }, escapeHtml,
-    (s, n) => String(s).slice(0, n),
-    () => "'<img onerror=", // 14 chars — both ' and <img present
-    () => ''
-  );
-  // Custom assertions (assertNoXss expects full payloads).
-  assert.ok(!/<img/.test(html),
-    'packets.js flat cell: raw <img survived: ' + html);
-  assert.ok(!/^[^&]*'/.test(html.replace('<td>', '').replace('</td>','')),
-    "packets.js flat cell: raw ' survived: " + html);
-  assert.ok(html.includes('&lt;img'),
-    'packets.js flat cell: &lt;img marker missing: ' + html);
-  assert.ok(html.includes('&#39;'),
-    'packets.js flat cell: &#39; marker missing: ' + html);
+  for (const fullNames of [false, true]) {
+    // Use short payloads — the 16-char cut would lop off the trailing single
+    // quote of a longer string. Both must survive in the first 16 chars.
+    const html = fn(
+      { observer_id: 'obs-1' },
+      loadObsCellName(() => "'<img onerror=", fullNames), // 14 chars — both ' and <img present
+      () => ''
+    );
+    // Custom assertions (assertNoXss expects full payloads).
+    assert.ok(!/<img/.test(html),
+      'packets.js flat cell: raw <img survived: ' + html);
+    assert.ok(!/^[^&]*'/.test(html.replace('<td>', '').replace('</td>','')),
+      "packets.js flat cell: raw ' survived: " + html);
+    assert.ok(html.includes('&lt;img'),
+      'packets.js flat cell: &lt;img marker missing: ' + html);
+    assert.ok(html.includes('&#39;'),
+      'packets.js flat cell: &#39; marker missing: ' + html);
+  }
 });
 
 // --- 7. public/map.js Leaflet popup — observer popup ---------------------
@@ -569,6 +586,113 @@ test('loadDetail catch block does NOT interpolate e.message into innerHTML', () 
     'loadDetail still interpolates e.message into innerHTML: ' + body);
   assert.ok(/textContent\s*=\s*[^;]*e\.message/.test(body),
     'loadDetail missing textContent assignment for e.message: ' + body);
+});
+
+// =========================================================================
+// E. URL-derived strings
+// =========================================================================
+console.log('\n=== E. URL-derived strings ===');
+
+test('app.js unknown-route page escapes the route taken from location.hash', () => {
+  const html = evalTemplate('public/app.js',
+    /(<div style="padding:40px;text-align:center;color:#6b7280"><h2>\$\{[^}]*route[^}]*\}<\/h2><p>Page not yet implemented\.<\/p><\/div>)/,
+    { route: TAG_PAYLOAD + ATTR_PAYLOAD });
+  assertNoXss(html, 'app.js unknown route');
+});
+
+// =========================================================================
+// H. Observer-controlled strings (iata / name / id) and node names
+//    These values come straight from the MQTT topic or JSON (observer iata,
+//    name, id) or from an ADVERT packet (node name). Anyone who can publish
+//    to a broker, or transmit on the mesh, controls them.
+// =========================================================================
+console.log('\n=== H. observer iata / name / id and node-name sinks ===');
+
+// Like evalTemplate, but for a string-concatenation expression rather than
+// a template literal. The captured group is evaluated as a JS expression.
+function evalConcat(srcFile, regex, bindings) {
+  const src = fs.readFileSync(srcFile, 'utf8');
+  const m = src.match(regex);
+  if (!m) throw new Error(`expression not found in ${srcFile} via ${regex}`);
+  const argNames = Object.keys(bindings);
+  const args = Object.values(bindings);
+  const truncate = (s, n) => (s == null ? '' : String(s).slice(0, n));
+  const fn = new Function(...argNames, 'escapeHtml', 'esc', 'truncate', 'return ' + m[1] + ';');
+  return fn(...args, escapeHtml, escapeHtml, truncate);
+}
+
+const PAYLOAD = TAG_PAYLOAD + ATTR_PAYLOAD;
+
+test('packets.js group row: Region badge escapes observer iata', () => {
+  const html = evalTemplate('public/packets.js',
+    /(<td class="col-region">\$\{groupRegion[\s\S]*?<\/td>)/, { groupRegion: PAYLOAD });
+  assertNoXss(html, 'packets.js groupRegion');
+});
+
+test('packets.js child row: Region badge escapes observer iata', () => {
+  const html = evalTemplate('public/packets.js',
+    /(<td class="col-region">\$\{childRegion[\s\S]*?<\/td>)/, { childRegion: PAYLOAD });
+  assertNoXss(html, 'packets.js childRegion');
+});
+
+test('packets.js single row: Region badge escapes observer iata', () => {
+  const html = evalTemplate('public/packets.js',
+    /(<td class="col-region">\$\{region \?[\s\S]*?<\/td>)/, { region: PAYLOAD });
+  assertNoXss(html, 'packets.js region');
+});
+
+test('observers.js table row: Region badge escapes o.iata', () => {
+  const html = evalTemplate('public/observers.js',
+    /(<td data-value="\$\{escapeHtml\(o\.iata \|\| ''\)\}">[\s\S]*?<\/td>)/, { o: { iata: PAYLOAD } });
+  assertNoXss(html, 'observers.js row iata');
+});
+
+test('observers.js slide-over: Region <dd> escapes o.iata', () => {
+  const html = evalConcat('public/observers.js',
+    /'<dt>Region<\/dt><dd>' \+ (\(o\.iata \? '<span class="badge-region">' \+ [^;]*?\+ '<\/span>' : '—'\))/,
+    { o: { iata: PAYLOAD } });
+  assertNoXss(html, 'observers.js slide-over iata');
+});
+
+test('live.js node detail: "Heard By — Regions" header escapes each iata', () => {
+  const html = evalTemplate('public/live.js',
+    /(<h4 style="[^"]*">Heard By\$\{regions\.length[\s\S]*?<\/h4>)/, { regions: [PAYLOAD] });
+  assertNoXss(html, 'live.js regions header');
+});
+
+test('nodes.js clock-skew evidence: observer name/id is escaped', () => {
+  const src = fs.readFileSync('public/nodes.js', 'utf8');
+  const m = src.match(/var name = ([^;]*o\.observerName \|\| o\.observerID[^;]*);/);
+  assert.ok(m, 'clock-skew observer name assignment not found');
+  const fn = new Function('o', 'escapeHtml', 'return ' + m[1] + ';');
+  const html = fn({ observerName: PAYLOAD }, escapeHtml);
+  assertNoXss(html, 'nodes.js clock-skew observer name');
+});
+
+test('analytics.js RF Health cell: observer_id is escaped inside attributes', () => {
+  const html = evalTemplate('public/analytics.js',
+    /(<div class="rf-cell\$\{isSelected[\s\S]*?id="rf-spark-\$\{[^}]*\}"><\/div>)/,
+    { isSelected: false, obs: { observer_id: '"' + PAYLOAD }, esc: escapeHtml,
+      name: 'obs', nf: '-100', nfClass: '', batt: '' });
+  assertNoXss(html, 'analytics.js rf-cell observer_id');
+  // A raw double quote in the id would end the attribute and start a new one.
+  assert.ok(!/data-observer="[^"]*"\s*'?\s*onfocus/i.test(html),
+    'raw " in observer_id broke out of data-observer attribute: ' + html);
+  assert.ok(html.includes('&quot;'), 'double quote in observer_id was not escaped: ' + html);
+});
+
+test('app.js favorites dropdown: node name is escaped', () => {
+  const html = evalConcat('public/app.js',
+    /'<span class="fav-dd-name">' \+ (\S+\(h\.node\.name \|\| truncate\(pk, 12\)\)|\(h\.node\.name \|\| truncate\(pk, 12\)\)) \+ '<\/span>'/,
+    { h: { node: { name: PAYLOAD } }, pk: 'abcdef' });
+  assertNoXss(html, 'app.js favorites node name');
+});
+
+test('customize-v2.js prune preview: node name is escaped', () => {
+  const html = evalConcat('public/customize-v2.js',
+    /return '<div>' \+ (\S*\(n\.name \|\| n\.pubkey\.slice\(0, 12\)\)) \+ coords \+ '<\/div>';/,
+    { n: { name: PAYLOAD, pubkey: 'abcdef0123456789' } });
+  assertNoXss(html, 'customize-v2.js prune preview node name');
 });
 
 // =========================================================================

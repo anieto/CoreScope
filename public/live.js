@@ -1314,7 +1314,7 @@
             <div class="live-toggles">
               <div class="live-node-filter-wrap" style="position:relative">
                 <label class="live-node-filter-hitarea" style="display:inline-flex; align-items:center; min-height:44px; cursor:text;">
-                  <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
+                  <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="" disabled>
                 </label>
                 <div id="liveNodeFilterDropdown" class="live-node-filter-dropdown hidden" role="listbox"></div>
                 <button id="liveNodeFilterClear" class="vcr-btn" title="Clear node filter" style="display:none">×</button>
@@ -2146,6 +2146,8 @@
         // Slight delay so click on a suggestion can register first.
         setTimeout(hideDropdown, 150);
       });
+      // Initial node loading yields before these handlers are installed (#2094).
+      nodeFilterInput.disabled = false;
     }
     if (nodeFilterClear) {
       nodeFilterClear.addEventListener('click', () => {
@@ -2885,7 +2887,7 @@
 
       if (observers.length) {
         const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))];
-        html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.join(', ') : ''}</h4>
+        html += `<h4 style="font-size:12px;margin:12px 0 6px;color:var(--text-muted);">Heard By${regions.length ? ' — Regions: ' + regions.map(r => escapeHtml(r)).join(', ') : ''}</h4>
           <div style="font-size:11px;">` +
           observers.map(o => `<div style="padding:2px 0;"><a href="#/observers/${encodeURIComponent(o.observer_id)}" style="color:var(--link-color);text-decoration:none;">${escapeHtml(o.observer_name || o.observer_id.slice(0, 12))}${o.iata ? ' (' + escapeHtml(o.iata) + ')' : ''}</a> — ${o.packetCount || o.count || 0} pkts</div>`).join('') +
           '</div>';
