@@ -93,6 +93,14 @@ func (s *PacketStore) RegionNodePubkeys(region string) (keys []string, ok bool) 
 	}
 	s.mu.RUnlock()
 
+	// MeshTexas: union with the DB-wide advert snapshot (region_nodes_durable.go).
+	for _, pk := range regionAdvertSnapshotKeys(codes) {
+		if !seen[pk] {
+			seen[pk] = true
+			keys = append(keys, pk)
+		}
+	}
+
 	s.regionNodesMu.Lock()
 	if len(s.regionNodesCache) >= regionNodesCacheMax {
 		for k, e := range s.regionNodesCache {
