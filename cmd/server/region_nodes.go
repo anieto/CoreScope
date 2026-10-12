@@ -73,6 +73,10 @@ func (s *PacketStore) RegionNodePubkeys(region string) (keys []string, ok bool) 
 	seen := make(map[string]bool, 256)
 	keys = make([]string, 0, 256)
 
+	// MeshTexas: the direct-hearing snapshot (region_nodes_durable.go) decides
+	// every node it knows; the scan below only adds nodes newer than it.
+	snapKeys, snapKnows, snapOK := regionSnapshotMembers(codes)
+
 	s.mu.RLock()
 	for _, tx := range s.byPayloadType[PayloadADVERT] {
 		heard := false
@@ -86,15 +90,14 @@ func (s *PacketStore) RegionNodePubkeys(region string) (keys []string, ok bool) 
 			continue
 		}
 		// Parsed only for adverts heard in the region, and cached on the tx.
-		if pk := advertPubkey(tx); pk != "" && !seen[pk] {
+		if pk := advertPubkey(tx); pk != "" && !seen[pk] && !(snapOK && snapKnows(strings.ToLower(pk))) {
 			seen[pk] = true
 			keys = append(keys, pk)
 		}
 	}
 	s.mu.RUnlock()
 
-	// MeshTexas: union with the DB-wide advert snapshot (region_nodes_durable.go).
-	for _, pk := range regionAdvertSnapshotKeys(codes) {
+	for _, pk := range snapKeys {
 		if !seen[pk] {
 			seen[pk] = true
 			keys = append(keys, pk)
