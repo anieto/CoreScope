@@ -82,6 +82,11 @@ type Config struct {
 	obsIATAWhitelistCached map[string]bool
 	obsIATAWhitelistOnce   sync.Once
 
+	// IATAAliases (MeshTexas) maps a retired region code in the MQTT topic to the
+	// code it is stored under, e.g. {"GGG": "TYR"}. Case-insensitive; applied
+	// before every filter, so filters and region lists name only the new code.
+	IATAAliases map[string]string `json:"iataAliases,omitempty"`
+
 	// IATAWarnIntervalSec throttles the one-line-per-region warning emitted when
 	// ObserverIATAWhitelist rejects a region. 0 => defaultIATAWarnIntervalSec.
 	IATAWarnIntervalSec int `json:"iataWarnIntervalSec,omitempty"`
@@ -399,6 +404,21 @@ func (c *Config) IsObserverBlacklisted(id string) bool {
 		c.obsBlacklistSetCached = m
 	})
 	return c.obsBlacklistSetCached[strings.ToLower(strings.TrimSpace(id))]
+}
+
+// ResolveIATAAlias returns the code a topic region is stored under: its alias
+// target when IATAAliases names it, otherwise the code unchanged.
+func (c *Config) ResolveIATAAlias(code string) string {
+	if c == nil || len(c.IATAAliases) == 0 {
+		return code
+	}
+	key := strings.ToUpper(strings.TrimSpace(code))
+	for from, to := range c.IATAAliases {
+		if strings.ToUpper(strings.TrimSpace(from)) == key && strings.TrimSpace(to) != "" {
+			return strings.ToUpper(strings.TrimSpace(to))
+		}
+	}
+	return code
 }
 
 // IsObserverIATAAllowed returns true if the given IATA code is permitted.

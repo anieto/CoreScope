@@ -818,6 +818,11 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 
 	topic := m.Topic()
 	parts := strings.Split(topic, "/")
+	// MeshTexas: a retired region code still sent by observers is stored as its
+	// replacement (GGG → TYR), so they join the right region before they retag.
+	if len(parts) > 1 {
+		parts[1] = cfg.ResolveIATAAlias(parts[1])
+	}
 
 	var msg map[string]interface{}
 	if err := json.Unmarshal(m.Payload(), &msg); err != nil {
