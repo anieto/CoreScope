@@ -23,8 +23,11 @@ import (
 //     at least directShareThreshold of the node's direct hearings (a set, so a
 //     boundary node can be in two regions, and one freak long-range hearing
 //     doesn't pin it somewhere it isn't);
-//   - never heard directly: every region that heard any of its adverts (the old
-//     rule, same fallback as #1025).
+//   - never heard directly: the regions that heard it in the fewest hops, or
+//     none when even its closest hearing is more than fallbackMaxHops away (it
+//     still shows under All). Every region that heard it at all, the old rule,
+//     leaked most of the mesh into every region: adverts flood statewide, so
+//     DFW and AUS observers both hear nodes on the Gulf Coast 10 hops out.
 // RegionNodePubkeys uses the snapshot for every node it knows, and upstream's
 // in-memory scan only for nodes newer than the last refresh. Requests never run
 // the query; until the first refresh lands the in-memory scan is used alone.
@@ -32,12 +35,14 @@ import (
 const (
 	regionAdvertSnapshotInterval = 10 * time.Minute
 	directShareThreshold         = 0.2
+	fallbackMaxHops              = 3
 )
 
 // regionHearing is one (node, region) row of the snapshot query.
 type regionHearing struct {
 	pubkey, iata  string
 	total, direct int
+	minHops       int // fewest hops of any hearing in this region
 }
 
 type regionSnapshot struct {
@@ -59,12 +64,12 @@ func startRegionAdvertSnapshot(db *DB, nodeDays int) {
 			if err != nil {
 				log.Printf("[region] advert snapshot failed: %v", err)
 			} else {
-				members, direct := buildRegionMembership(rows)
+				members, direct, unplaced := buildRegionMembership(rows)
 				regionAdvertSnapMu.Lock()
 				regionAdvertSnap = &regionSnapshot{members: members}
 				regionAdvertSnapMu.Unlock()
-				log.Printf("[region] advert snapshot: %d nodes (%d by direct hearings) in %v",
-					len(members), direct, time.Since(t0).Round(time.Millisecond))
+				log.Printf("[region] advert snapshot: %d nodes (%d by direct hearings, %d in no region) in %v",
+					len(members), direct, unplaced, time.Since(t0).Round(time.Millisecond))
 			}
 			time.Sleep(regionAdvertSnapshotInterval)
 		}
@@ -72,11 +77,12 @@ func startRegionAdvertSnapshot(db *DB, nodeDays int) {
 }
 
 // buildRegionMembership applies the membership rule above to snapshot rows.
-// It returns pubkey -> region set, and how many nodes were placed by direct
-// hearings rather than the fallback.
-func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, int) {
+// It returns pubkey -> region set (empty for a node in no region, which keeps
+// the in-memory scan from re-adding it), how many nodes were placed by direct
+// hearings, and how many ended up in no region.
+func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, int, int) {
 	type node struct {
-		any         []string
+		hops        map[string]int
 		direct      map[string]int
 		directTotal int
 	}
@@ -84,17 +90,17 @@ func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, in
 	for _, r := range rows {
 		n := nodes[r.pubkey]
 		if n == nil {
-			n = &node{direct: map[string]int{}}
+			n = &node{hops: map[string]int{}, direct: map[string]int{}}
 			nodes[r.pubkey] = n
 		}
-		n.any = append(n.any, r.iata)
+		n.hops[r.iata] = r.minHops
 		if r.direct > 0 {
 			n.direct[r.iata] += r.direct
 			n.directTotal += r.direct
 		}
 	}
 	members := make(map[string]map[string]bool, len(nodes))
-	placedByDirect := 0
+	placedByDirect, unplaced := 0, 0
 	for pk, n := range nodes {
 		set := make(map[string]bool)
 		if n.directTotal > 0 {
@@ -105,13 +111,26 @@ func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, in
 				}
 			}
 		} else {
-			for _, iata := range n.any {
-				set[iata] = true
+			fewest := -1
+			for _, h := range n.hops {
+				if fewest < 0 || h < fewest {
+					fewest = h
+				}
 			}
+			if fewest <= fallbackMaxHops {
+				for iata, h := range n.hops {
+					if h == fewest {
+						set[iata] = true
+					}
+				}
+			}
+		}
+		if len(set) == 0 {
+			unplaced++
 		}
 		members[pk] = set
 	}
-	return members, placedByDirect
+	return members, placedByDirect, unplaced
 }
 
 // regionSnapshotMembers returns the snapshot's pubkeys in any of codes (already
@@ -137,8 +156,8 @@ func regionSnapshotMembers(codes []string) (keys []string, known func(string) bo
 }
 
 // regionAdvertHearings counts, per node and observer region, the observations
-// of the node's adverts in the last nodeDays and how many were heard directly
-// (empty path). Observers' current IATA codes are used, like
+// of the node's adverts in the last nodeDays, how many were heard directly
+// (empty path), and the fewest hops any of them took. Observers' current IATA codes are used, like
 // resolveRegionObservers.
 func (db *DB) regionAdvertHearings(nodeDays int) ([]regionHearing, error) {
 	joinCond := "obs.rowid = o.observer_idx"
@@ -148,7 +167,10 @@ func (db *DB) regionAdvertHearings(nodeDays int) ([]regionHearing, error) {
 	since := time.Now().UTC().AddDate(0, 0, -nodeDays).Format(time.RFC3339)
 	rows, err := db.conn.Query(fmt.Sprintf(`
 		SELECT t.from_pubkey, UPPER(TRIM(obs.iata)), COUNT(*),
-		       SUM(CASE WHEN o.path_json IS NULL OR o.path_json IN ('', '[]') THEN 1 ELSE 0 END)
+		       SUM(CASE WHEN o.path_json IS NULL OR o.path_json IN ('', '[]') THEN 1 ELSE 0 END),
+		       MIN(CASE WHEN o.path_json IS NULL OR o.path_json IN ('', '[]') THEN 0
+		                WHEN json_valid(o.path_json) THEN json_array_length(o.path_json)
+		                ELSE 1000 END)
 		FROM transmissions t
 		JOIN observations o ON o.transmission_id = t.id
 		JOIN observers obs ON %s
@@ -164,7 +186,7 @@ func (db *DB) regionAdvertHearings(nodeDays int) ([]regionHearing, error) {
 	var out []regionHearing
 	for rows.Next() {
 		var r regionHearing
-		if err := rows.Scan(&r.pubkey, &r.iata, &r.total, &r.direct); err != nil {
+		if err := rows.Scan(&r.pubkey, &r.iata, &r.total, &r.direct, &r.minHops); err != nil {
 			continue
 		}
 		r.pubkey = strings.ToLower(r.pubkey)
