@@ -19,7 +19,7 @@ func newRelayAirtimeShareTestStore(packets []*StoreTx) *PacketStore {
 		byObserver:     make(map[string][]*StoreObs),
 		byNode:         make(map[string][]*StoreTx),
 		byPathHop:      make(map[string][]*StoreTx),
-		nodeHashes:     make(map[string]map[string]bool),
+		nodeHashes:     newNodeSets(),
 		byPayloadType:  make(map[int][]*StoreTx),
 		rfCache:        make(map[string]*cachedResult),
 		topoCache:      make(map[string]*cachedResult),
@@ -28,8 +28,6 @@ func newRelayAirtimeShareTestStore(packets []*StoreTx) *PacketStore {
 		chanCache:      make(map[string]*cachedResult),
 		distCache:      make(map[string]*cachedResult),
 		subpathCache:   make(map[string]*cachedResult),
-		spIndex:        make(map[string]int),
-		spTxIndex:      make(map[string][]*StoreTx),
 		advertPubkeys:  make(map[string]int),
 	}
 	ps.useResolvedPathIndex = true

@@ -107,13 +107,13 @@ func main() {
 	if cfg.ApprovedChannelsEnabled() {
 		logApprovedChannelsSource(cfg.UsersDBPath())
 		keySet.refresh()
-		go func() {
-			t := time.NewTicker(approvedChannelsRefresh)
-			defer t.Stop()
-			for range t.C {
-				keySet.refresh()
-			}
-		}()
+	}
+
+	// Linked-only ingest (clientRxCoverage.requireLinkedCompanion): nil when
+	// off or ignored. Installed before any MQTT source connects.
+	if lc := newLinkedCompanionFilter(cfg); lc != nil {
+		store.linkedCompanions = lc
+		go lc.refreshLoop()
 	}
 
 	regionSet := newRegionKeySet(cfg)
@@ -126,6 +126,21 @@ func main() {
 	}
 	store.BackfillDefaultScopeAsync(regionSet)
 	store.BackfillTransportCodesAsync()
+
+	// #2107: re-decides unresolved GRP_TXT and scope rows whenever either key
+	// set grows. Built here so the approved-channels refresh can kick it;
+	// started below, once the write path is ready.
+	keyBackfill := newKeyBackfiller(store, keySet, regionSet)
+	if cfg.ApprovedChannelsEnabled() {
+		go func() {
+			t := time.NewTicker(approvedChannelsRefresh)
+			defer t.Stop()
+			for range t.C {
+				keySet.refresh()
+				keyBackfill.Kick() // two small SELECTs unless an approval brought a new key
+			}
+		}()
+	}
 
 	// Subscribe-early + buffer (#1608): the MQTT subscription is brought up
 	// before startup maintenance so no packets are missed while the single
@@ -363,6 +378,12 @@ func main() {
 	if err := store.RunAsyncMigration(evidenceCtx, "advert_route_evidence_v1", store.backfillAdvertEvidence); err != nil {
 		log.Printf("[migration] scheduling advert evidence backfill: %v", err)
 	}
+	// #2107: re-decide unresolved GRP_TXT and scope rows whenever the key set
+	// grows. Starts after the write path is ready, like the evidence backfill
+	// above; it yields the writer between bounded batches.
+	keyBackfillCtx, stopKeyBackfill := context.WithCancel(context.Background())
+	defer stopKeyBackfill()
+	keyBackfillDone := keyBackfill.Start(keyBackfillCtx)
 	if d := ingestBuffer.Dropped(); d > 0 {
 		log.Printf("[ingest-buffer] write path ready; draining backlog (dropped %d during startup — consider raising ingestBufferSize)", d)
 	} else {
@@ -482,6 +503,7 @@ func main() {
 			for range regionRefreshTicker.C {
 				regionSet.refreshFromStore(store)
 				logScopeMatchCounters()
+				keyBackfill.Kick() // no-op unless the refresh brought a new key
 			}
 		}()
 		log.Printf("[regions] auto-derived region keys enabled: refreshing every %v, cap %d", interval, cfg.AutoRegionKeysMaxDerived())
@@ -504,7 +526,8 @@ func main() {
 
 	// Daily planner statistics refresh (#2058), in two parts.
 	//
-	// The routine refresh is staggered 2 minutes past startup for the same reason
+	// The routine refresh runs 24 hours after the previous one, recorded next to
+	// the database (#2146), and is staggered at least 2 minutes past startup for the same reason
 	// as the checkpoint above: it takes the write lock, and by then the initial
 	// ingest burst has passed, so it also sees the rows that burst added.
 	//
@@ -521,17 +544,24 @@ func main() {
 		if analysisLimit < 0 {
 			log.Printf("[analyze] planner statistics refresh disabled (db.analysisLimit=%d)", analysisLimit)
 		} else {
-			analyzeTicker := time.NewTicker(24 * time.Hour)
 			go func() {
 				// Before the stagger, and only on a database that has never been
 				// analyzed: the stagger is a 2 minute window in which the first
 				// query would otherwise run on no statistics at all. A restart
 				// finds sqlite_stat1 already in the file and skips this.
 				store.EnsurePlannerStats(analysisLimit)
-				time.Sleep(2 * time.Minute)
-				store.RefreshPlannerStats(analysisLimit)
-				for range analyzeTicker.C {
-					store.RefreshPlannerStats(analysisLimit)
+				// Each refresh waits until the previous one is 24h old, also
+				// across restarts (#2146): a restart no longer pays a cold
+				// ANALYZE for statistics that are hours old at most.
+				for {
+					wait := nextPlannerStatsRefresh(store.lastPlannerStatsRefresh(), time.Now())
+					log.Printf("[analyze] next planner statistics refresh in %v", wait.Round(time.Minute))
+					time.Sleep(wait)
+					if !store.RefreshPlannerStats(analysisLimit) {
+						// Not recorded, so the next wait would be the 2 minute
+						// stagger; keep the daily rhythm instead of retrying.
+						time.Sleep(plannerStatsInterval)
+					}
 				}
 			}()
 			log.Printf("[analyze] planner statistics refresh scheduled every 24h (analysis_limit=%d)", analysisLimit)
@@ -638,6 +668,12 @@ func main() {
 
 	log.Println("Shutting down...")
 	stopEvidenceBackfill()
+	stopKeyBackfill()
+	select { // let an in-flight batch commit or roll back cleanly
+	case <-keyBackfillDone:
+	case <-time.After(5 * time.Second):
+		log.Printf("[key-backfill] still running at shutdown; its last committed batch is where it resumes")
+	}
 	retentionTicker.Stop()
 	metricsRetentionTicker.Stop()
 	if packetRetentionTicker != nil {
@@ -852,6 +888,11 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		// every sub-topic.
 		if cfg.IsObserverBlacklisted(parts[2]) {
 			log.Printf("MQTT [%s] client %.8s blacklisted, dropping", tag, parts[2])
+			return
+		}
+		// Linked-only ingest (clientRxCoverage.requireLinkedCompanion): an
+		// unlinked companion is dropped before any client handler runs.
+		if !store.allowClientPubkey(parts[2]) {
 			return
 		}
 		switch parts[3] {

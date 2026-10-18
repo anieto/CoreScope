@@ -829,12 +829,12 @@ func TestNodeHealthPartialFromPackets(t *testing.T) {
 		srv.store.byNode = make(map[string][]*StoreTx)
 	}
 	if srv.store.nodeHashes == nil {
-		srv.store.nodeHashes = make(map[string]map[string]bool)
+		srv.store.nodeHashes = newNodeSets()
 	}
 	srv.store.byNode[ghostPubkey] = []*StoreTx{
 		{Hash: "abc123", FirstSeen: now, SNR: &snr, ObservationCount: 1},
 	}
-	srv.store.nodeHashes[ghostPubkey] = map[string]bool{"abc123": true}
+	srv.store.nodeHashes[ghostPubkey] = map[int]struct{}{0: {}}
 	srv.store.mu.Unlock()
 
 	req := httptest.NewRequest("GET", "/api/nodes/"+ghostPubkey+"/health", nil)
@@ -1981,6 +1981,35 @@ func TestIataCoordsIncludesNapaAndSonoma(t *testing.T) {
 	}{
 		{"APC", 38.2132, -122.2807},
 		{"STS", 38.509, -122.8128},
+	}
+	for _, c := range cases {
+		coord, ok := iataCoords[c.code]
+		if !ok {
+			t.Errorf("iataCoords missing %q", c.code)
+			continue
+		}
+		if coord.Lat != c.lat || coord.Lon != c.lon {
+			t.Errorf("%s = {%v, %v}, want {%v, %v}", c.code, coord.Lat, coord.Lon, c.lat, c.lon)
+		}
+	}
+}
+
+func TestIataCoordsIncludesBelgianObserverCodes(t *testing.T) {
+	// Issue #2098: a Belgian deployment's observers use these codes and none
+	// was in the table, so the last-hop region filter never ran there.
+	// Coordinates from OurAirports airports.csv.
+	cases := []struct {
+		code     string
+		lat, lon float64
+	}{
+		{"ANR", 51.190667, 4.463153},
+		{"BRU", 50.901402, 4.48444},
+		{"GNE", 51.020551, 3.730341},
+		{"KJK", 50.818878, 3.209551},
+		{"LGG", 50.638574, 5.443897},
+		{"OBL", 51.269092, 4.762428},
+		{"OST", 51.1998, 2.874673},
+		{"MST", 50.911087, 5.769401},
 	}
 	for _, c := range cases {
 		coord, ok := iataCoords[c.code]
@@ -3982,7 +4011,7 @@ func TestNodeInResolvedPath(t *testing.T) {
 	// which uses the membership index. Test the index-based approach.
 	store := &PacketStore{
 		byNode:               make(map[string][]*StoreTx),
-		nodeHashes:           make(map[string]map[string]bool),
+		nodeHashes:           newNodeSets(),
 		useResolvedPathIndex: true,
 	}
 	store.initResolvedPathIndex()

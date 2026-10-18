@@ -1874,7 +1874,7 @@ func TestEnrichObs(t *testing.T) {
 		t.Skip("no observations loaded")
 	}
 
-	enriched := store.enrichObs(obs)
+	enriched := store.enrichObsWithTx(obs, store.byTxID[obs.TransmissionID])
 	if enriched["observer_id"] == nil {
 		t.Error("expected observer_id")
 	}
@@ -2331,14 +2331,6 @@ func TestSubpathPrecomputedIndex(t *testing.T) {
 		t.Fatal("indexes never became ready")
 	}
 
-	// After Load(), the precomputed index must be populated.
-	if len(store.spIndex) == 0 {
-		t.Fatal("expected spIndex to be populated after Load()")
-	}
-	if store.spTotalPaths == 0 {
-		t.Fatal("expected spTotalPaths > 0 after Load()")
-	}
-
 	// The rich test DB has paths ["aa","bb"], ["aabb","ccdd"], and
 	// ["eeff","0011","2233"].  That yields 5 unique raw subpaths.
 	expectedRaw := map[string]int{
@@ -2349,15 +2341,9 @@ func TestSubpathPrecomputedIndex(t *testing.T) {
 		"eeff,0011,2233": 1,
 	}
 	for key, want := range expectedRaw {
-		got, ok := store.spIndex[key]
-		if !ok {
-			t.Errorf("expected spIndex[%q] to exist", key)
-		} else if got != want {
-			t.Errorf("spIndex[%q] = %d, want %d", key, got, want)
+		if got := len(store.txsWithSubpath(strings.Split(key, ","))); got != want {
+			t.Errorf("txsWithSubpath(%q) = %d, want %d", key, got, want)
 		}
-	}
-	if store.spTotalPaths != 3 {
-		t.Errorf("spTotalPaths = %d, want 3", store.spTotalPaths)
 	}
 
 	// Fast-path (no region) and slow-path (with region) must return the
@@ -2373,9 +2359,9 @@ func TestSubpathPrecomputedIndex(t *testing.T) {
 		}
 	}
 
-	// Verify fast path totalPaths matches index.
-	if tp, ok := fast["totalPaths"].(int); ok && tp != store.spTotalPaths {
-		t.Errorf("fast totalPaths=%d, spTotalPaths=%d", tp, store.spTotalPaths)
+	// Three stored paths have two or more hops.
+	if tp, _ := fast["totalPaths"].(int); tp != 3 {
+		t.Errorf("fast totalPaths = %d, want 3", tp)
 	}
 }
 
@@ -2389,24 +2375,7 @@ func TestSubpathTxIndexPopulated(t *testing.T) {
 		t.Fatal("indexes never became ready")
 	}
 
-	// spTxIndex must be populated alongside spIndex
-	if len(store.spTxIndex) == 0 {
-		t.Fatal("expected spTxIndex to be populated after Load()")
-	}
-
-	// Every key in spIndex must also exist in spTxIndex with matching count
-	for key, count := range store.spIndex {
-		txs, ok := store.spTxIndex[key]
-		if !ok {
-			t.Errorf("spTxIndex missing key %q that exists in spIndex", key)
-			continue
-		}
-		if len(txs) != count {
-			t.Errorf("spTxIndex[%q] has %d txs, spIndex count is %d", key, len(txs), count)
-		}
-	}
-
-	// GetSubpathDetail should return correct match count via indexed lookup
+	// GetSubpathDetail should return the correct match count
 	detail := store.GetSubpathDetail([]string{"eeff", "0011"})
 	if detail == nil {
 		t.Fatal("expected non-nil detail for existing subpath")
@@ -4357,7 +4326,7 @@ func TestResolveRegionObserversCacheMissNewRegion(t *testing.T) {
 func TestIndexByNodePreCheck(t *testing.T) {
 	store := &PacketStore{
 		byNode:     make(map[string][]*StoreTx),
-		nodeHashes: make(map[string]map[string]bool),
+		nodeHashes: newNodeSets(),
 	}
 
 	t.Run("indexes ADVERT with pubKey", func(t *testing.T) {
@@ -4416,7 +4385,7 @@ func TestIndexByNodePreCheck(t *testing.T) {
 func TestIndexByNodeResolvedPath(t *testing.T) {
 	store := &PacketStore{
 		byNode:     make(map[string][]*StoreTx),
-		nodeHashes: make(map[string]map[string]bool),
+		nodeHashes: newNodeSets(),
 	}
 
 	t.Run("decoded JSON pubkeys still indexed", func(t *testing.T) {
@@ -4466,7 +4435,7 @@ func BenchmarkIndexByNode(b *testing.B) {
 	b.Run("no_pubkey_skip", func(b *testing.B) {
 		store := &PacketStore{
 			byNode:     make(map[string][]*StoreTx),
-			nodeHashes: make(map[string]map[string]bool),
+			nodeHashes: newNodeSets(),
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -4481,7 +4450,7 @@ func BenchmarkIndexByNode(b *testing.B) {
 	b.Run("with_pubkey_parse", func(b *testing.B) {
 		store := &PacketStore{
 			byNode:     make(map[string][]*StoreTx),
-			nodeHashes: make(map[string]map[string]bool),
+			nodeHashes: newNodeSets(),
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {

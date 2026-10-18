@@ -1095,6 +1095,25 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+/* Visible-only throttle for background refreshes (nav stats).
+ * Returns trigger(); calling it runs fn() at most once per opts.minIntervalMs,
+ * and never while the tab is hidden. opts.now and opts.isHidden are injectable
+ * for tests. */
+function createVisibleThrottle(fn, opts) {
+  const minIntervalMs = opts.minIntervalMs;
+  const now = opts.now || Date.now;
+  const isHidden = opts.isHidden || function () { return typeof document !== 'undefined' && !!document.hidden; };
+  let last = -Infinity;
+  return function trigger() {
+    if (isHidden()) return false;
+    const t = now();
+    if (t - last < minIntervalMs) return false;
+    last = t;
+    fn();
+    return true;
+  };
+}
+
 /* Debounced WS helper — batches rapid messages, calls fn with array of msgs */
 function debouncedOnWS(fn, ms) {
   if (typeof ms === 'undefined') ms = 250;
@@ -1729,13 +1748,15 @@ window.addEventListener('DOMContentLoaded', () => {
     const items = await Promise.all(favs.map(async (pk) => {
       try {
         const h = await api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth });
-        const age = h.stats.lastHeard ? Date.now() - new Date(h.stats.lastHeard).getTime() : null;
-        const statusCls = age === null ? 'status-err' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'status-ok' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'status-warn' : 'status-err';
-        const statusLabel = age === null ? 'unknown' : age < HEALTH_THRESHOLDS.nodeDegradedMs ? 'healthy' : age < HEALTH_THRESHOLDS.nodeSilentMs ? 'degraded' : 'silent';
+        // Packet-store time first, then the DB's last_seen, as My Repeaters does.
+        const heard = h.stats.lastHeard || (h.node && h.node.last_seen);
+        const status = getHealthStatus(h.node && h.node.role, heard);
+        const statusCls = status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err';
+        const statusLabel = status || 'unknown';
         return '<a href="#/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
           + '<span class="fav-dd-status ' + statusCls + '" title="' + statusLabel + '" aria-label="' + statusLabel + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>'
           + '<span class="fav-dd-name">' + escapeHtml(h.node.name || truncate(pk, 12)) + '</span>'
-          + '<span class="fav-dd-meta">' + (h.stats.lastHeard ? timeAgo(h.stats.lastHeard) : 'never') + '</span>'
+          + '<span class="fav-dd-meta">' + (heard ? timeAgo(heard) : 'never') + '</span>'
           + favStar(pk, 'fav-dd-star')
           + '</a>';
       } catch {
@@ -1885,9 +1906,15 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     } catch {}
   }
-  updateNavStats();
-  setInterval(updateNavStats, 15000);
-  debouncedOnWS(function () { updateNavStats(); });
+  // One refresh per 15 s at most, none in hidden tabs: the timer, live packets
+  // and returning to the tab all go through the same throttle.
+  const refreshNavStats = createVisibleThrottle(updateNavStats, { minIntervalMs: 15000 });
+  refreshNavStats();
+  setInterval(refreshNavStats, 15000);
+  debouncedOnWS(function () { refreshNavStats(); });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) refreshNavStats();
+  });
 
   // --- Theme Customization ---
   // Fetch theme config and apply via customizer v2 pipeline

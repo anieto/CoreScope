@@ -368,6 +368,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 
 	chunkIdx := 0
 	totalLoaded := 0
+	capped := false // the memory cap stopped the walk with rows left (#748)
 	// Start the id cursor BELOW the minimum possible row id so the
 	// first chunk's `t2.id > cursorID` predicate includes id=0. The
 	// e2e fixture seed for issue #1486 inserts the grouped-packet row
@@ -461,6 +462,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 		s.fireChunkCallbacks(chunkTxCount, totalLoaded)
 
 		if maxPackets > 0 && int64(totalLoaded) >= maxPackets {
+			capped = totalInDB < 0 || totalLoaded < totalInDB
 			break
 		}
 		if chunkTxCount < chunkSize {
@@ -489,13 +491,15 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	sort.SliceStable(s.packets, func(i, j int) bool {
 		return s.packets[i].FirstSeen < s.packets[j].FirstSeen
 	})
-	s.buildSubpathIndex()
 	s.buildPathHopIndex()
 	s.buildDistanceIndex()
 	if s.hotStartupHours > 0 {
 		s.oldestLoaded = hotCutoffStr
 	} else if len(s.packets) > 0 {
 		s.oldestLoaded = s.packets[0].FirstSeen
+	}
+	if capped {
+		s.loadCapEdge = time.Now().UTC().Format(time.RFC3339)
 	}
 	s.loaded = true
 	s.mu.Unlock()
@@ -535,31 +539,34 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 	seenTxIDs := make(map[int]bool)
 	var maxID int64
 
-	for rows.Next() {
-		var txID int
-		var rawHex, hash, firstSeen, decodedJSON sql.NullString
-		var routeType, payloadType, payloadVersion sql.NullInt64
-		var obsID sql.NullInt64
-		var observerID, observerName, observerIATA, direction, pathJSON, obsTimestamp sql.NullString
-		var snr, rssi sql.NullFloat64
-		var score sql.NullInt64
-		var obsRawHex sql.NullString
-		var resolvedPathStr sql.NullString
-		var scopeName sql.NullString
+	// Scan overwrites every target on each row, so one set (and one
+	// argument slice) serves the whole loop instead of escaping per row.
+	var txID int
+	var rawHex, hash, firstSeen, decodedJSON sql.NullString
+	var routeType, payloadType, payloadVersion sql.NullInt64
+	var obsID sql.NullInt64
+	var observerID, observerName, observerIATA, direction, pathJSON, obsTimestamp sql.NullString
+	var snr, rssi sql.NullFloat64
+	var score sql.NullInt64
+	var obsRawHex sql.NullString
+	var resolvedPathStr sql.NullString
+	var scopeName sql.NullString
 
-		scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
-			&payloadVersion, &decodedJSON,
-			&obsID, &observerID, &observerName, &observerIATA, &direction,
-			&snr, &rssi, &score, &pathJSON, &obsTimestamp}
-		if s.db.hasObsRawHex {
-			scanArgs = append(scanArgs, &obsRawHex)
-		}
-		if s.db.hasResolvedPath {
-			scanArgs = append(scanArgs, &resolvedPathStr)
-		}
-		if s.db.hasScopeName {
-			scanArgs = append(scanArgs, &scopeName)
-		}
+	scanArgs := []interface{}{&txID, &rawHex, &hash, &firstSeen, &routeType, &payloadType,
+		&payloadVersion, &decodedJSON,
+		&obsID, &observerID, &observerName, &observerIATA, &direction,
+		&snr, &rssi, &score, &pathJSON, &obsTimestamp}
+	if s.db.hasObsRawHex {
+		scanArgs = append(scanArgs, &obsRawHex)
+	}
+	if s.db.hasResolvedPath {
+		scanArgs = append(scanArgs, &resolvedPathStr)
+	}
+	if s.db.hasScopeName {
+		scanArgs = append(scanArgs, &scopeName)
+	}
+
+	for rows.Next() {
 		if err := rows.Scan(scanArgs...); err != nil {
 			log.Printf("[store] LoadChunked scan error: %v", err)
 			continue
@@ -583,8 +590,6 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				PayloadType: nullIntPtr(payloadType),
 				DecodedJSON: nullStrVal(decodedJSON),
 				ScopeName:   nullStrPtr(scopeName),
-				obsKeys:     make(map[string]bool),
-				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
 			s.packets = append(s.packets, tx)
@@ -606,18 +611,17 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 			obsIDStr := nullStrVal(observerID)
 			obsPJ := nullStrVal(pathJSON)
 
-			dk := obsIDStr + "|" + obsPJ
-			if tx.obsKeys[dk] {
+			if tx.hasObservation(obsIDStr, obsPJ) {
 				continue
 			}
 
 			obs := &StoreObs{
 				ID:             oid,
 				TransmissionID: txID,
-				ObserverID:     obsIDStr,
-				ObserverName:   nullStrVal(observerName),
-				ObserverIATA:   nullStrVal(observerIATA),
-				Direction:      nullStrVal(direction),
+				ObserverID:     internStr(obsIDStr),
+				ObserverName:   internStr(nullStrVal(observerName)),
+				ObserverIATA:   internStr(nullStrVal(observerIATA)),
+				Direction:      internStr(nullStrVal(direction)),
 				SNR:            nullFloatPtr(snr),
 				RSSI:           nullFloatPtr(rssi),
 				Score:          nullIntPtr(score),
@@ -630,8 +634,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 
 			rpStr := nullStrVal(resolvedPathStr)
 			if rpStr != "" {
-				rp := unmarshalResolvedPath(rpStr)
-				pks := extractResolvedPubkeys(rp)
+				pks := resolvedPubkeysFromJSON(rpStr)
 				s.indexResolvedPathHops(tx, pks, hopsSeen)
 			} else if relayPM != nil && obsPJ != "" && obsPJ != "[]" {
 				// resolved_path is NULL on live (since #1287 relay data is
@@ -649,13 +652,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				}
 			}
 
-			tx.Observations = append(tx.Observations, obs)
-			tx.obsKeys[dk] = true
-			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
-				tx.observerSet[obs.ObserverID] = true
-				tx.UniqueObserverCount++
-			}
-			tx.ObservationCount++
+			tx.addObservation(obs)
 			if obs.Timestamp > tx.LatestSeen {
 				tx.LatestSeen = obs.Timestamp
 			}
