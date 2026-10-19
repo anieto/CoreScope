@@ -1814,6 +1814,8 @@
       TYR: [32.4200, -95.0200], // between Tyler and Longview (was GGG until 2026-10-14)
       CRP: [27.8006, -97.3964],
       ACT: [31.5493, -97.1467],
+      LBB: [33.5779, -101.8552],
+      MAF: [31.9200, -102.2200], // between Midland and Odessa
     };
 
     // Nearest-centroid classification by the node's own lat/lon (squared-
