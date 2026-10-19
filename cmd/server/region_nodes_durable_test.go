@@ -92,6 +92,27 @@ func TestRegionSnapshotMembers(t *testing.T) {
 	}
 }
 
+func TestApplyRegionPins(t *testing.T) {
+	members, _, _ := buildRegionMembership([]regionHearing{
+		{pubkey: "blanco", iata: "AUS", total: 9, direct: 0, minHops: 2},
+		{pubkey: "blanco", iata: "SAT", total: 3, direct: 0, minHops: 3},
+	})
+	applyRegionPins(members, map[string][]string{
+		" BLANCO ": {"sat"},
+		"quiet":    {"SAT", " "},
+		"":         {"AUS"},
+	})
+	if want := map[string]bool{"AUS": true, "SAT": true}; !reflect.DeepEqual(members["blanco"], want) {
+		t.Fatalf("blanco = %v, want %v", members["blanco"], want)
+	}
+	if want := map[string]bool{"SAT": true}; !reflect.DeepEqual(members["quiet"], want) {
+		t.Fatalf("quiet = %v, want %v", members["quiet"], want)
+	}
+	if _, ok := members[""]; ok {
+		t.Fatal("empty pubkey pinned")
+	}
+}
+
 func TestRegionAdvertHearingsMinHops(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

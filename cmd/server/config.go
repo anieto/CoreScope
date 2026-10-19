@@ -58,6 +58,11 @@ type Config struct {
 	// underlying observation history remains intact.
 	HiddenNamePrefixes []string `json:"hiddenNamePrefixes"`
 
+	// RegionPins (MeshTexas) adds regions to specific nodes on top of the
+	// computed region membership: public key -> IATA codes. For boundary nodes
+	// the fewest-hops rule places in only one region. See region_nodes_durable.go.
+	RegionPins map[string][]string `json:"regionPins"`
+
 	// hiddenPrefixesPtr holds the active prefix slice as an atomic pointer.
 	// Read path (IsNameHidden) is a single atomic load — no mutex, no
 	// sync.Once. Writers always replace the whole slice; readers see either

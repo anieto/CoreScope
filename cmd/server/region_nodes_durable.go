@@ -28,6 +28,7 @@ import (
 //     still shows under All). Every region that heard it at all, the old rule,
 //     leaked most of the mesh into every region: adverts flood statewide, so
 //     DFW and AUS observers both hear nodes on the Gulf Coast 10 hops out.
+// Config regionPins then add hand-picked regions to specific nodes.
 // RegionNodePubkeys uses the snapshot for every node it knows, and upstream's
 // in-memory scan only for nodes newer than the last refresh. Requests never run
 // the query; until the first refresh lands the in-memory scan is used alone.
@@ -56,7 +57,7 @@ var (
 
 // startRegionAdvertSnapshot refreshes the snapshot now and then every
 // regionAdvertSnapshotInterval, for the life of the process.
-func startRegionAdvertSnapshot(db *DB, nodeDays int) {
+func startRegionAdvertSnapshot(db *DB, nodeDays int, pins map[string][]string) {
 	go func() {
 		for {
 			t0 := time.Now()
@@ -65,6 +66,7 @@ func startRegionAdvertSnapshot(db *DB, nodeDays int) {
 				log.Printf("[region] advert snapshot failed: %v", err)
 			} else {
 				members, direct, unplaced := buildRegionMembership(rows)
+				applyRegionPins(members, pins)
 				regionAdvertSnapMu.Lock()
 				regionAdvertSnap = &regionSnapshot{members: members}
 				regionAdvertSnapMu.Unlock()
@@ -131,6 +133,28 @@ func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, in
 		members[pk] = set
 	}
 	return members, placedByDirect, unplaced
+}
+
+// applyRegionPins adds each pinned node's configured regions to its computed
+// set, keeping the regions it was already placed in. A pinned node the
+// snapshot doesn't know yet is added with just its pinned regions.
+func applyRegionPins(members map[string]map[string]bool, pins map[string][]string) {
+	for pk, codes := range pins {
+		pk = strings.ToLower(strings.TrimSpace(pk))
+		if pk == "" {
+			continue
+		}
+		set := members[pk]
+		if set == nil {
+			set = make(map[string]bool)
+			members[pk] = set
+		}
+		for _, c := range codes {
+			if c = strings.TrimSpace(strings.ToUpper(c)); c != "" {
+				set[c] = true
+			}
+		}
+	}
 }
 
 // regionSnapshotMembers returns the snapshot's pubkeys in any of codes (already
