@@ -749,7 +749,14 @@ func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
 		"opacity": 1,
 	}, s.cfg.MarkerStroke, theme.MarkerStroke)
 
+	distanceUnit := ""
+	switch s.cfg.DistanceUnit {
+	case "km", "mi", "auto":
+		distanceUnit = s.cfg.DistanceUnit
+	}
+
 	writeJSON(w, ThemeResponse{
+		DistanceUnit: distanceUnit,
 		Branding:     branding,
 		Theme:        themeColors,
 		ThemeDark:    themeDark,

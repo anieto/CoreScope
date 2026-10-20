@@ -1069,6 +1069,7 @@ type ThemeResponse struct {
 	// #1488 — marker stroke overlay so the frontend can apply server-side
 	// defaults before the operator's localStorage override loads.
 	MarkerStroke map[string]interface{} `json:"markerStroke,omitempty"`
+	DistanceUnit string                 `json:"distanceUnit,omitempty"`
 }
 
 type MapConfigResponse struct {

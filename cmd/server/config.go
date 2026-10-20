@@ -102,6 +102,10 @@ type Config struct {
 	// public/customize-v2.js applyCSS markerStroke block.
 	MarkerStroke map[string]interface{} `json:"markerStroke,omitempty"`
 
+	// Default distance unit for visitors without their own choice:
+	// "km", "mi", or "auto" (browser locale). Empty means auto.
+	DistanceUnit string `json:"distanceUnit,omitempty"`
+
 	MapDefaults struct {
 		Center []float64 `json:"center"`
 		Zoom   int       `json:"zoom"`
