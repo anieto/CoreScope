@@ -643,15 +643,21 @@
   // the (buffered) home area cut out. Styled inline because the Live map
   // renders paths on canvas, where CSS classes do not apply.
   window.HOME_AREA_SHADE_KEY = 'meshtexas-home-area-shade';
-  window.makeHomeAreaShade = function () {
+  window.makeHomeAreaShade = function (map) {
     var a = window.MC_HOME_AREA;
     if (!a || typeof L === 'undefined') return null;
     var hole = (Array.isArray(a.outline) && a.outline.length >= 3) ? a.outline : a.polygon;
     var world = [[85, -180], [85, 180], [-85, 180], [-85, -180]];
-    // Leaflet draws paths only 10% past the viewport; mid zoom-out that edge
-    // shrinks into view and the shade pops back at zoomend. A separate
-    // renderer with a wide margin keeps it covered during the animation.
-    var renderer = L.svg({ padding: 1.5 });
+    // Own pane between tiles (200) and overlays (400): live.css hides the
+    // overlay pane during zoom animations, which made the shade blink. The
+    // wide renderer margin keeps its clipped edge off screen while zooming out.
+    var pane = 'homeAreaShadePane';
+    if (map && !map.getPane(pane)) {
+      var el = map.createPane(pane);
+      el.style.zIndex = 350;
+      el.style.pointerEvents = 'none';
+    }
+    var renderer = L.svg({ padding: 1.5, pane: map ? pane : 'overlayPane' });
     var root = document.documentElement;
     var dark = root.getAttribute('data-theme') === 'dark' ||
       (root.getAttribute('data-theme') !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);

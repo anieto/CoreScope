@@ -1443,7 +1443,7 @@
       const shadeMap = map;
       Promise.resolve(window.MeshConfigReady).then(function () {
         if (shadeMap !== map || !window.homeAreaShadeEnabled || !window.homeAreaShadeEnabled()) return;
-        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade() : null;
+        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade(shadeMap) : null;
         if (shade) shade.addTo(shadeMap);
       }).catch(function () {});
     }

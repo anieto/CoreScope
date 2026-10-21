@@ -907,7 +907,7 @@
       const shadeMap = map;
       Promise.resolve(window.MeshConfigReady).then(function () {
         const shadeEl = document.getElementById('mcHomeShade');
-        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade() : null;
+        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade(shadeMap) : null;
         if (!shadeEl || !shade || !shadeMap || shadeMap !== map) return;
         document.getElementById('mcHomeShadeText').textContent = 'Shade outside ' + window.homeAreaName();
         document.getElementById('mcHomeShadeLabel').style.display = '';
