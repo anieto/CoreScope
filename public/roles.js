@@ -377,7 +377,7 @@
     var strokeAttr = ' stroke="var(--mc-marker-stroke-color)" stroke-width="var(--mc-marker-stroke-width)" stroke-opacity="var(--mc-marker-stroke-opacity)"';
     // MeshTexas: hollow (outline-only) variant for nodes outside the home area.
     var paint = (opts && opts.hollow)
-      ? '" fill="' + fill + '" fill-opacity="0.15" stroke="' + fill + '" stroke-width="2.5"'
+      ? '" fill="' + fill + '" fill-opacity="0.1" stroke="' + fill + '" stroke-width="1.5" stroke-opacity="0.7"'
       : '" fill="' + fill + '"' + strokeAttr;
     var path;
     switch (shape) {

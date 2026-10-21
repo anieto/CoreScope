@@ -353,7 +353,7 @@
     const strokeAttr = ' stroke="var(--mc-marker-stroke-color)" stroke-width="var(--mc-marker-stroke-width)" stroke-opacity="var(--mc-marker-stroke-opacity)"';
     // MeshTexas: outside the home area → outline only, role colour kept.
     const paint = isOutside
-      ? ` fill="${fillColor}" fill-opacity="0.15" stroke="${fillColor}" stroke-width="2.5"`
+      ? ` fill="${fillColor}" fill-opacity="0.1" stroke="${fillColor}" stroke-width="1.5" stroke-opacity="0.7"`
       : ` fill="${fillColor}"${strokeAttr}`;
     const size = s.radius * 2 + 4;
     const c = size / 2;
