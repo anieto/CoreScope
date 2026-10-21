@@ -651,11 +651,16 @@
     var root = document.documentElement;
     var dark = root.getAttribute('data-theme') === 'dark' ||
       (root.getAttribute('data-theme') !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    return L.polygon([world, hole], {
+    var outside = L.polygon([world, hole], {
       interactive: false,
       color: dark ? '#94a3b8' : '#64748b', weight: 1, opacity: 0.5, dashArray: '4 4',
       fillColor: '#000', fillOpacity: dark ? 0.25 : 0.07,
     });
+    if (!dark) return outside;
+    // Dark tiles are already near black, so darkening the outside barely
+    // shows; a faint glow inside the home area carries the contrast instead.
+    var inside = L.polygon(hole, { interactive: false, stroke: false, fillColor: '#fff', fillOpacity: 0.07 });
+    return L.layerGroup([outside, inside]);
   };
   window.homeAreaShadeEnabled = function () {
     try { return localStorage.getItem(window.HOME_AREA_SHADE_KEY) !== 'false'; } catch (e) { return true; }
