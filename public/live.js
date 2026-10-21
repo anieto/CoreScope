@@ -1431,6 +1431,7 @@
 
     map = L.map('liveMap', {
       zoomControl: false,
+      zoomSnap: 0.5, zoomDelta: 0.5, wheelPxPerZoomLevel: 120, // MeshTexas: half-level steps
       attributionControl: false,
       zoomAnimation: true,
       markerZoomAnimation: true,

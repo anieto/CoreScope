@@ -606,7 +606,7 @@
         try { const v = JSON.parse(savedView); initCenter = [v.lat, v.lng]; initZoom = v.zoom; } catch {}
       }
     }
-    map = L.map('leaflet-map', { zoomControl: true }).setView(initCenter, initZoom);
+    map = L.map('leaflet-map', { zoomControl: true, zoomSnap: 0.5, zoomDelta: 0.5, wheelPxPerZoomLevel: 120 }).setView(initCenter, initZoom);
     const initializedMap = map;
 
     // If navigated with ?node=PUBKEY, highlight that node after markers load
