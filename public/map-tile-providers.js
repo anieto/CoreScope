@@ -236,9 +236,19 @@
     var _overrideLightId = null;
     var _overrideDarkId  = null;
 
+    // MeshTexas: tell overlays (the home-area shade) whether the base map is
+    // dark. null = Auto, so it follows the site theme; an explicit pick can be
+    // a dark map in light mode or the reverse.
+    function _setBaseDark(v) {
+      if (map._mcBaseDark === v) return;
+      map._mcBaseDark = v;
+      if (typeof map.fire === 'function') map.fire('mc-basemap-tone');
+    }
+
     // Restore the auto tile group and kick _syncDarkTiles
     function _activateAuto() {
       _isAuto = true;
+      _setBaseDark(null);
       try { 
         var pane = map.getPane('tilePane');
         if (pane) pane.removeAttribute('data-explicit-layer');
@@ -297,6 +307,7 @@
             pane.setAttribute('data-explicit-layer', 'true');
             pane.style.filter = p.invertFilter || ''; // Clears it if null!
           }
+          _setBaseDark(p.type === 'dark');
         });
 
         _layerMap[id] = layer;

@@ -669,8 +669,11 @@
     }
     var renderer = L.svg({ padding: 1.5, pane: map ? pane : 'overlayPane' });
     var root = document.documentElement;
-    var dark = root.getAttribute('data-theme') === 'dark' ||
-      (root.getAttribute('data-theme') !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    // Match the base map, not the site theme: the map picker allows a dark
+    // map in light mode and the reverse (map._mcBaseDark, null on Auto).
+    var dark = (map && typeof map._mcBaseDark === 'boolean') ? map._mcBaseDark :
+      (root.getAttribute('data-theme') === 'dark' ||
+      (root.getAttribute('data-theme') !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches));
     var outside = L.polygon([world, hole], {
       interactive: false,
       color: dark ? '#94a3b8' : '#64748b', weight: 1, opacity: 0.5, dashArray: '4 4',
@@ -682,9 +685,9 @@
     var inside = L.polygon(hole, { interactive: false, stroke: false, fillColor: '#fff', fillOpacity: 0.06, renderer: renderer });
     return L.layerGroup([outside, inside]);
   };
-  // The shade's look depends on the theme, so rebuild it whenever the theme
-  // changes; otherwise a light/dark toggle left the other theme's shade on
-  // the map until a reload.
+  // The shade's look depends on how dark the base map is, so rebuild it
+  // whenever the theme or the picked map changes; otherwise the other
+  // theme's shade stayed on the map until a reload.
   window.attachHomeAreaShade = function (map) {
     var layer = null, on = false;
     function rebuild() {
@@ -706,6 +709,7 @@
       obs.disconnect();
       if (mq && mq.removeEventListener) mq.removeEventListener('change', rebuild);
     }
+    map.on('mc-basemap-tone', rebuild);
     map.on('unload', stop);
     return { set: function (v) { on = !!v; rebuild(); } };
   };
