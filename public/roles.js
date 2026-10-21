@@ -362,7 +362,7 @@
    * Caller controls colour to allow theming overrides (matrix mode,
    * stale dim, etc.) without rebuilding the marker.
    */
-  window.makeRoleMarkerSVG = function (role, color, size) {
+  window.makeRoleMarkerSVG = function (role, color, size, opts) {
     var shape = (window.ROLE_SHAPES && window.ROLE_SHAPES[role]) || 'circle';
     size = size || 16;
     var c = size / 2;
@@ -375,20 +375,24 @@
     // #1488 — stroke routed through CSS vars so operators can dial
     // colour/width without code edits (customizer Colors → Marker Stroke).
     var strokeAttr = ' stroke="var(--mc-marker-stroke-color)" stroke-width="var(--mc-marker-stroke-width)" stroke-opacity="var(--mc-marker-stroke-opacity)"';
+    // MeshTexas: hollow (outline-only) variant for nodes outside the home area.
+    var paint = (opts && opts.hollow)
+      ? '" fill="' + fill + '" fill-opacity="0.15" stroke="' + fill + '" stroke-width="2.5"'
+      : '" fill="' + fill + '"' + strokeAttr;
     var path;
     switch (shape) {
       case 'square':
         path = '<rect x="3" y="3" width="' + (size - 6) + '" height="' + (size - 6) +
-               '" fill="' + fill + '"' + strokeAttr + '/>';
+               paint + '/>';
         break;
       case 'triangle':
         path = '<polygon points="' + c + ',2 ' + (size - 2) + ',' + (size - 2) +
-               ' 2,' + (size - 2) + '" fill="' + fill + '"' + strokeAttr + '/>';
+               ' 2,' + (size - 2) + paint + '/>';
         break;
       case 'diamond':
         path = '<polygon points="' + c + ',2 ' + (size - 2) + ',' + c + ' ' +
                c + ',' + (size - 2) + ' 2,' + c +
-               '" fill="' + fill + '"' + strokeAttr + '/>';
+               paint + '/>';
         break;
       case 'hexagon': {
         // Pointy-top hexagon centred at (c,c), inscribed radius ≈ c-1.5
@@ -399,8 +403,7 @@
           pts += (c + r * Math.cos(a)).toFixed(2) + ',' +
                  (c + r * Math.sin(a)).toFixed(2) + ' ';
         }
-        path = '<polygon points="' + pts.trim() + '" fill="' + fill +
-               '"' + strokeAttr + '/>';
+        path = '<polygon points="' + pts.trim() + paint + '/>';
         break;
       }
       case 'star': {
@@ -412,13 +415,12 @@
           spts += (cx + outer * Math.cos(aO)) + ',' + (cy + outer * Math.sin(aO)) + ' ';
           spts += (cx + inner * Math.cos(aI)) + ',' + (cy + inner * Math.sin(aI)) + ' ';
         }
-        path = '<polygon points="' + spts.trim() + '" fill="' + fill +
-               '"' + strokeAttr + '/>';
+        path = '<polygon points="' + spts.trim() + paint + '/>';
         break;
       }
       default: // circle
         path = '<circle cx="' + c + '" cy="' + c + '" r="' + (c - 2) +
-               '" fill="' + fill + '"' + strokeAttr + '/>';
+               paint + '/>';
     }
     return '<svg width="' + size + '" height="' + size +
            '" viewBox="0 0 ' + size + ' ' + size +
@@ -599,6 +601,51 @@
     flasher: 'https://flasher.meshcore.io/'
   };
 
+  // MeshTexas: home area test, using the same geometry as the server's
+  // geofilter (ray-cast polygon plus a flat-earth buffer). Nodes without a
+  // position count as inside.
+  window.MC_HOME_AREA = null;
+  function _homeAreaSegKm(lat, lon, a, b) {
+    var cosLat = Math.cos((a[0] + b[0]) / 2 * Math.PI / 180);
+    var ax = (a[1] - lon) * 111 * cosLat, ay = (a[0] - lat) * 111;
+    var bx = (b[1] - lon) * 111 * cosLat, by = (b[0] - lat) * 111;
+    var abx = bx - ax, aby = by - ay, abSq = abx * abx + aby * aby;
+    if (abSq === 0) return Math.sqrt(ax * ax + ay * ay);
+    var t = Math.max(0, Math.min(1, -(ax * abx + ay * aby) / abSq));
+    var px = ax + t * abx, py = ay + t * aby;
+    return Math.sqrt(px * px + py * py);
+  }
+  window.isOutsideHomeArea = function (lat, lon) {
+    var area = window.MC_HOME_AREA;
+    if (!area || lat == null || lon == null) return false;
+    lat = +lat; lon = +lon;
+    if (!isFinite(lat) || !isFinite(lon) || (lat === 0 && lon === 0)) return false;
+    var poly = area.polygon, n = poly.length, inside = false;
+    for (var i = 0, j = n - 1; i < n; j = i++) {
+      var yi = poly[i][0], xi = poly[i][1], yj = poly[j][0], xj = poly[j][1];
+      if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    if (inside) return false;
+    var buf = +area.bufferKm || 0;
+    if (buf > 0) {
+      for (var k = 0; k < n; k++) {
+        if (_homeAreaSegKm(lat, lon, poly[k], poly[(k + 1) % n]) <= buf) return false;
+      }
+    }
+    return true;
+  };
+  function _homeAreaName() {
+    var a = window.MC_HOME_AREA;
+    return String((a && a.name) || 'the home area').replace(/[<>&"]/g, '');
+  }
+  window.homeAreaOutsideText = function () {
+    var name = _homeAreaName();
+    return 'Located outside ' + name + ' \u00b7 heard by ' + name + ' observers';
+  };
+  window.homeAreaLegendText = function () {
+    return 'Hollow = located outside ' + _homeAreaName();
+  };
+
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
     window.MC_CLIENT_RX_COVERAGE = cfg.clientRxCoverage === true;
@@ -673,6 +720,8 @@
     window.MC_CUSTOMIZER_CFG = (cfg.customizer && typeof cfg.customizer === 'object')
       ? { disabledTabs: Array.isArray(cfg.customizer.disabledTabs) ? cfg.customizer.disabledTabs : [] }
       : { disabledTabs: [] };
+    // MeshTexas: home area (polygon + buffer); nodes outside it draw hollow.
+    window.MC_HOME_AREA = (cfg.homeArea && Array.isArray(cfg.homeArea.polygon) && cfg.homeArea.polygon.length >= 3) ? cfg.homeArea : null;
     // Optional user management: present only when the server enables it.
     window.MC_USER_MGMT = (cfg.userManagement && cfg.userManagement.enabled) ? { enabled: true, channelProposals: !!cfg.userManagement.channelProposals, notifications: !!cfg.userManagement.notifications } : null;
     // #1574 — operator-configurable cap on /live map node count.

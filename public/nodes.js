@@ -1664,7 +1664,7 @@
       const cs = _fleetSkew && _fleetSkew[n.public_key];
       const skewBadgeHtml = cs && cs.severity && cs.severity !== 'ok' ? renderSkewBadge(cs.severity, window.currentSkewValue(cs), cs) : '';
       return `<tr data-key="${n.public_key}" data-action="select" data-value="${n.public_key}" tabindex="0" role="row" class="${selectedKey === n.public_key ? 'selected' : ''}${isClaimed ? ' claimed-row' : ''}">
-        <td>${favStar(n.public_key, 'node-fav')}${isClaimed ? '<span class="claimed-badge" title="My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg></span> ' : ''}<strong>${escapeHtml(n.name || '(unnamed)')}</strong>${dupNameBadge(n.name, n.public_key, dupMap)}${skewBadgeHtml}</td>
+        <td>${favStar(n.public_key, 'node-fav')}${isClaimed ? '<span class="claimed-badge" title="My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg></span> ' : ''}<strong>${escapeHtml(n.name || '(unnamed)')}</strong>${dupNameBadge(n.name, n.public_key, dupMap)}${skewBadgeHtml}${(window.isOutsideHomeArea && window.isOutsideHomeArea(n.lat, n.lon)) ? ' <span class="badge badge-outside" title="' + window.homeAreaOutsideText() + '">Out of state</span>' : ''}</td>
         <td class="mono col-pubkey">${truncate(n.public_key, 16)}</td>
         <td><span class="badge" style="${(window.aaBadgeStyle && window.aaBadgeStyle(roleColor)) || ('background:'+roleColor+';color:#fff')}">${n.role}</span></td>
         <td style="font-family:var(--mono);font-size:12px">${n.default_scope ? escapeHtml(n.default_scope) : ''}</td>

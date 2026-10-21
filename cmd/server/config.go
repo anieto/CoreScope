@@ -106,6 +106,11 @@ type Config struct {
 	// "km", "mi", or "auto" (browser locale). Empty means auto.
 	DistanceUnit string `json:"distanceUnit,omitempty"`
 
+	// MeshTexas: the network's home area. Nodes outside the polygon (plus
+	// BufferKm) are drawn hollow on the maps; unlike geo_filter, nothing is
+	// hidden or dropped.
+	HomeArea *HomeAreaConfig `json:"homeArea,omitempty"`
+
 	MapDefaults struct {
 		Center []float64 `json:"center"`
 		Zoom   int       `json:"zoom"`
@@ -383,6 +388,14 @@ type PacketStoreConfig struct {
 
 // GeoFilterConfig is an alias for the shared geofilter.Config type.
 type GeoFilterConfig = geofilter.Config
+
+// HomeAreaConfig describes the home area for display only. Polygon points
+// are [lat, lon], the same order geo_filter uses.
+type HomeAreaConfig struct {
+	Name     string       `json:"name,omitempty"`
+	Polygon  [][2]float64 `json:"polygon"`
+	BufferKm float64      `json:"bufferKm,omitempty"`
+}
 
 // PathTrustConfig is an alias for the shared packetpath.TrustConfig type
 // (issue #1784). See packetpath.TrustConfig for the full doc comment.

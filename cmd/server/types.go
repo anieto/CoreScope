@@ -1106,6 +1106,7 @@ type ClientConfigResponse struct {
 	// Present only when user management is on, so the payload is unchanged
 	// for every instance that leaves it off.
 	UserManagement *ClientUserManagement `json:"userManagement,omitempty"`
+	HomeArea       *HomeAreaConfig       `json:"homeArea,omitempty"`
 }
 
 // ClientUserManagement tells the frontend that accounts exist, and whether

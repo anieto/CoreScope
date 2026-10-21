@@ -553,6 +553,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		ClientRxRequireLinkedCompanion: s.auth != nil && s.cfg.ClientRxRequireLinkedCompanionSet(),
 		PathTrust:                      &pathTrust,
 		UserManagement:                 s.clientUserManagement(),
+		HomeArea:                       s.cfg.HomeArea,
 	})
 }
 

@@ -2531,6 +2531,12 @@
         li.innerHTML = `<span class="live-shape-swatch" aria-hidden="true">${swatch}</span> ${(ROLE_LABELS[role] || role).replace(/s$/, '')}`;
         roleLegendList.appendChild(li);
       }
+      Promise.resolve(window.MeshConfigReady).then(function () {
+        if (!window.MC_HOME_AREA || !window.makeRoleMarkerSVG) return;
+        const li = document.createElement('li');
+        li.innerHTML = '<span class="live-shape-swatch" aria-hidden="true">' + window.makeRoleMarkerSVG('companion', 'var(--text-muted)', 14, { hollow: true }) + '</span> ' + window.homeAreaLegendText();
+        roleLegendList.appendChild(li);
+      }).catch(function () {});
     }
 
     // Node detail panel
@@ -2868,6 +2874,7 @@
           <div style="margin-bottom:12px;">
             <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${roleColor};color:#fff;">${roleLabel.toUpperCase()}</span>
             <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">${statusLabel}</span>
+            ${(window.isOutsideHomeArea && window.isOutsideHomeArea(n.lat, n.lon)) ? '<div class="home-area-outside-note">' + window.homeAreaOutsideText() + '</div>' : ''}
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
             <code style="font-size:10px;word-break:break-all;">${escapeHtml(n.public_key)}</code>
@@ -2985,6 +2992,8 @@
 
   async function loadNodes(beforeTs) {
     try {
+      // MeshTexas: marker styling needs the home area from client config.
+      try { await window.MeshConfigReady; } catch (e) {}
       const aqs = AreaFilter.areaQueryString();
       // #1108 — honor region selector for visible map nodes unless
       // "Show all nodes" is enabled. Empty string when no region set.
@@ -3292,6 +3301,7 @@
     // for matrix mode / pulse animations that need an explicit value.
     const fillExpr = 'var(--mc-role-' + (n.role || 'companion') + ')';
     const isRepeater = n.role === 'repeater';
+    const isOutside = window.isOutsideHomeArea ? window.isOutsideHomeArea(n.lat, n.lon) : false;
     const zoom = map ? map.getZoom() : 11;
     const zoomScale = Math.max(0.4, (zoom - 8) / 6);
     // Shape-aware sizing: keep prior visual weight (~6/4 base) but
@@ -3300,14 +3310,14 @@
     let sizePx = evenSize(Math.max(10, Math.round((isRepeater ? 18 : 14) * zoomScale)));
 
     const svgHtml = (window.makeRoleMarkerSVG
-      ? window.makeRoleMarkerSVG(n.role, null, sizePx)
+      ? window.makeRoleMarkerSVG(n.role, null, sizePx, { hollow: isOutside })
       : '<svg width="' + sizePx + '" height="' + sizePx + '" viewBox="0 0 ' + sizePx + ' ' + sizePx +
         '"><circle cx="' + (sizePx/2) + '" cy="' + (sizePx/2) + '" r="' + (sizePx/2 - 2) +
         '" fill="' + fillExpr + '" stroke="var(--mc-marker-stroke-color)" stroke-width="var(--mc-marker-stroke-width)" stroke-opacity="var(--mc-marker-stroke-opacity)"/></svg>');
 
     const icon = L.divIcon({
       html: svgHtml,
-      className: 'live-node-marker live-node-' + (n.role || 'unknown'),
+      className: 'live-node-marker live-node-' + (n.role || 'unknown') + (isOutside ? ' marker-outside' : ''),
       iconSize: [sizePx, sizePx],
       iconAnchor: [sizePx / 2, sizePx / 2],
       popupAnchor: [0, -sizePx / 2]
@@ -3327,7 +3337,7 @@
       }
     }
 
-    marker.bindTooltip(escapeHtml(n.name || n.public_key.slice(0, 8)), {
+    marker.bindTooltip(escapeHtml(n.name || n.public_key.slice(0, 8)) + (isOutside ? '<br><span class="home-area-outside-note">' + window.homeAreaOutsideText() + '</span>' : ''), {
       permanent: false, direction: 'top', offset: [0, -sizePx / 2], className: 'live-tooltip'
     });
 
@@ -3336,6 +3346,7 @@
     marker._baseColor = color;
     marker._baseSize = sizePx;
     marker._role = n.role || 'unknown';
+    marker._outside = isOutside;
     nodeMarkers[n.public_key] = marker;
 
     // Apply matrix tint if active — re-render the SVG with matrix colour
@@ -3343,7 +3354,7 @@
       marker._matrixPrevColor = color;
       marker._baseColor = '#008a22';
       const mxHtml = window.makeRoleMarkerSVG
-        ? window.makeRoleMarkerSVG(marker._role, '#008a22', sizePx)
+        ? window.makeRoleMarkerSVG(marker._role, '#008a22', sizePx, { hollow: marker._outside })
         : svgHtml;
       const el = marker.getElement();
       if (el) el.innerHTML = mxHtml;
@@ -3387,7 +3398,7 @@
     var el = _liveMarkerEl(marker);
     if (!el) return;
     if (window.makeRoleMarkerSVG) {
-      el.innerHTML = window.makeRoleMarkerSVG(marker._role || 'unknown', color, marker._baseSize || 14);
+      el.innerHTML = window.makeRoleMarkerSVG(marker._role || 'unknown', color, marker._baseSize || 14, { hollow: marker._outside });
     } else {
       // Fallback: tweak fill on first shape
       var shape = el.querySelector('svg > *');

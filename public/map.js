@@ -341,7 +341,7 @@
     return out;
   }
 
-  function makeMarkerIcon(role, isStale, isAlsoObserver, colorOverride) {
+  function makeMarkerIcon(role, isStale, isAlsoObserver, colorOverride, isOutside) {
     const s = ROLE_STYLE[role] || ROLE_STYLE.companion;
     // #1438: default fill resolves through the live CSS var so existing
     // mounted SVG markers recolor when cb-preset switches or the
@@ -351,18 +351,22 @@
     // #1488 — marker stroke through CSS vars so operators can dial
     // colour / width / opacity via the customizer (Colors → Marker Stroke).
     const strokeAttr = ' stroke="var(--mc-marker-stroke-color)" stroke-width="var(--mc-marker-stroke-width)" stroke-opacity="var(--mc-marker-stroke-opacity)"';
+    // MeshTexas: outside the home area → outline only, role colour kept.
+    const paint = isOutside
+      ? ` fill="${fillColor}" fill-opacity="0.15" stroke="${fillColor}" stroke-width="2.5"`
+      : ` fill="${fillColor}"${strokeAttr}`;
     const size = s.radius * 2 + 4;
     const c = size / 2;
     let path;
     switch (s.shape) {
       case 'diamond':
-        path = `<polygon points="${c},2 ${size-2},${c} ${c},${size-2} 2,${c}" fill="${fillColor}"${strokeAttr}/>`;
+        path = `<polygon points="${c},2 ${size-2},${c} ${c},${size-2} 2,${c}"${paint}/>`;
         break;
       case 'square':
-        path = `<rect x="3" y="3" width="${size-6}" height="${size-6}" fill="${fillColor}"${strokeAttr}/>`;
+        path = `<rect x="3" y="3" width="${size-6}" height="${size-6}"${paint}/>`;
         break;
       case 'triangle':
-        path = `<polygon points="${c},2 ${size-2},${size-2} 2,${size-2}" fill="${fillColor}"${strokeAttr}/>`;
+        path = `<polygon points="${c},2 ${size-2},${size-2} 2,${size-2}"${paint}/>`;
         break;
       case 'hexagon': {
         // #1293 — pointy-top hexagon for room servers
@@ -373,7 +377,7 @@
           hpts += (c + hr * Math.cos(ha)).toFixed(2) + ',' +
                   (c + hr * Math.sin(ha)).toFixed(2) + ' ';
         }
-        path = `<polygon points="${hpts.trim()}" fill="${fillColor}"${strokeAttr}/>`;
+        path = `<polygon points="${hpts.trim()}"${paint}/>`;
         break;
       }
       case 'star': {
@@ -386,11 +390,11 @@
           pts += `${cx + outer * Math.cos(aOuter)},${cy + outer * Math.sin(aOuter)} `;
           pts += `${cx + inner * Math.cos(aInner)},${cy + inner * Math.sin(aInner)} `;
         }
-        path = `<polygon points="${pts.trim()}" fill="${fillColor}"${strokeAttr}/>`;
+        path = `<polygon points="${pts.trim()}"${paint}/>`;
         break;
       }
       default: // circle
-        path = `<circle cx="${c}" cy="${c}" r="${c-2}" fill="${fillColor}"${strokeAttr}/>`;
+        path = `<circle cx="${c}" cy="${c}" r="${c-2}"${paint}/>`;
     }
     // If this node is also an observer, add a small star overlay
     let obsOverlay = '';
@@ -410,14 +414,14 @@
     const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">${path}${obsOverlay}</svg>`;
     return L.divIcon({
       html: svg,
-      className: 'meshcore-marker' + (isStale ? ' marker-stale' : ''),
+      className: 'meshcore-marker' + (isStale ? ' marker-stale' : '') + (isOutside ? ' marker-outside' : ''),
       iconSize: [size, size],
       iconAnchor: [c, c],
       popupAnchor: [0, -c],
     });
   }
 
-  function makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus, scopeState) {
+  function makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus, scopeState, isOutside) {
     // Show the short mesh hash ID (first N bytes of pubkey, uppercased). When
     // the width is unobserved the label falls back to one byte — it has to draw
     // something — but says so instead of asserting a 1-byte config.
@@ -464,7 +468,7 @@
       '<span aria-hidden="true">' + visible + '</span>' + obsIndicator + '</div>';
     return L.divIcon({
       html: html,
-      className: 'meshcore-marker meshcore-label-marker' + (isStale ? ' marker-stale' : ''),
+      className: 'meshcore-marker meshcore-label-marker' + (isStale ? ' marker-stale' : '') + (isOutside ? ' marker-outside' : ''),
       iconSize: null,
       iconAnchor: [14, 12],
       popupAnchor: [0, -12],
@@ -1750,6 +1754,8 @@
   async function loadNodes() {
     const loadingMap = map;
     if (!loadingMap) return;
+    // MeshTexas: marker styling needs the home area from client config.
+    try { await window.MeshConfigReady; } catch (e) {}
     try {
       // Load regions from config + observed IATAs
       let regions = REGION_NAMES;
@@ -1884,6 +1890,12 @@
         renderMarkers();
       });
       el.appendChild(lbl);
+    }
+    if (window.MC_HOME_AREA && window.makeRoleMarkerSVG) {
+      const note = document.createElement('div');
+      note.className = 'home-area-legend';
+      note.innerHTML = '<span aria-hidden="true">' + window.makeRoleMarkerSVG('companion', 'var(--text-muted)', 14, { hollow: true }) + '</span> ' + window.homeAreaLegendText();
+      el.appendChild(note);
     }
   }
 
@@ -2111,6 +2123,7 @@
     for (const node of filtered) {
       const lastSeenTime = node.last_heard || node.last_seen;
       const isStale = getNodeStatus(node) === 'stale'; // #1598: relay-aware for infra
+      const isOutside = window.isOutsideHomeArea ? window.isOutsideHomeArea(node.lat, node.lon) : false;
       const pk = (node.public_key || '').toLowerCase();
       const isAlsoObserver = _observerByPubkey.has(pk);
       const useLabel = node.role === 'repeater' && filters.hashLabels;
@@ -2130,7 +2143,7 @@
       // scope overlay stands down rather than the two fighting over the fill.
       var scopeState = (scopeTintEnabled(filters.scopeOverlay, filters.scopeState) && !mbColor) ? (node.scope_config_state || null) : null;
       var scopeColor = scopeState ? scopeTint(node) : null;
-      const icon = useLabel ? makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus, scopeState) : makeMarkerIcon(node.role || 'companion', isStale, isAlsoObserver, mbColor || scopeColor);
+      const icon = useLabel ? makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus, scopeState, isOutside) : makeMarkerIcon(node.role || 'companion', isStale, isAlsoObserver, mbColor || scopeColor, isOutside);
       const latLng = L.latLng(node.lat, node.lon);
       // The scope state has to leave the fill and reach the DOM, or a dot marker
       // is colour and nothing else — which on the achromat preset is six greys
@@ -2141,8 +2154,9 @@
       // produced. The popup carries it too, for the pointerless case.
       var scopeLabel = scopeState ? scopeStateLabel(scopeState) : '';
       var markerAlt = (node.name || 'Unknown') + ' (' + (node.role || 'node') + (isAlsoObserver ? ' + observer' : '') + ')' +
-        (scopeLabel ? ', scope config ' + scopeLabel : '');
-      allMarkers.push({ latLng, node, icon, isLabel: useLabel, popupFn: function() { return buildPopup(node); }, alt: markerAlt, title: scopeLabel ? markerAlt : '' });
+        (scopeLabel ? ', scope config ' + scopeLabel : '') +
+        (isOutside ? ', ' + window.homeAreaOutsideText() : '');
+      allMarkers.push({ latLng, node, icon, isLabel: useLabel, popupFn: function() { return buildPopup(node); }, alt: markerAlt, title: (scopeLabel || isOutside) ? markerAlt : '' });
     }
 
     // Add observer markers (skip observers already represented as a node marker)
@@ -2321,6 +2335,7 @@
       <div class="map-popup" style="font-family:var(--font);min-width:180px;">
         <h3 style="font-weight:700;font-size:14px;margin:0 0 4px;">${safeEsc(node.name || 'Unknown')}</h3>
         ${roleBadge}${obsBadge}
+        ${(window.isOutsideHomeArea && window.isOutsideHomeArea(node.lat, node.lon)) ? '<div class="home-area-outside-note">' + window.homeAreaOutsideText() + '</div>' : ''}
         <dl style="margin-top:8px;font-size:12px;">
           ${hashPrefixRow}
           ${mbRow}
