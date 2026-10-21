@@ -1437,6 +1437,16 @@
       preferCanvas: true
     }).setView(mapCenter, mapZoom);
 
+    // MeshTexas: shade outside the home area; toggled from the Map page.
+    {
+      const shadeMap = map;
+      Promise.resolve(window.MeshConfigReady).then(function () {
+        if (shadeMap !== map || !window.homeAreaShadeEnabled || !window.homeAreaShadeEnabled()) return;
+        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade() : null;
+        if (shade) shade.addTo(shadeMap);
+      }).catch(function () {});
+    }
+
     // 1. Create a custom pane for high-performance canvas animations
     map.createPane('animationsPane');
 

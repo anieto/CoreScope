@@ -639,6 +639,27 @@
     return String((a && a.name) || 'the home area').replace(/[<>&"]/g, '');
   }
   window.homeAreaName = _homeAreaName;
+  // Light shade over everything outside the home area, as one polygon with
+  // the (buffered) home area cut out. Styled inline because the Live map
+  // renders paths on canvas, where CSS classes do not apply.
+  window.HOME_AREA_SHADE_KEY = 'meshtexas-home-area-shade';
+  window.makeHomeAreaShade = function () {
+    var a = window.MC_HOME_AREA;
+    if (!a || typeof L === 'undefined') return null;
+    var hole = (Array.isArray(a.outline) && a.outline.length >= 3) ? a.outline : a.polygon;
+    var world = [[85, -180], [85, 180], [-85, 180], [-85, -180]];
+    var root = document.documentElement;
+    var dark = root.getAttribute('data-theme') === 'dark' ||
+      (root.getAttribute('data-theme') !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    return L.polygon([world, hole], {
+      interactive: false,
+      color: dark ? '#94a3b8' : '#64748b', weight: 1, opacity: 0.5, dashArray: '4 4',
+      fillColor: '#000', fillOpacity: dark ? 0.25 : 0.07,
+    });
+  };
+  window.homeAreaShadeEnabled = function () {
+    try { return localStorage.getItem(window.HOME_AREA_SHADE_KEY) !== 'false'; } catch (e) { return true; }
+  };
   window.homeAreaOutsideText = function () {
     var name = _homeAreaName();
     return 'Located outside ' + name + ' \u00b7 heard by ' + name + ' observers';

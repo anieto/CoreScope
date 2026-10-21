@@ -522,6 +522,7 @@
             <label for="mcMultiByte"><input type="checkbox" id="mcMultiByte"> Multi-byte support</label>
             <label for="mcScopeOverlay" title="Colour repeater markers by their region-scope configuration"><input type="checkbox" id="mcScopeOverlay"> Scope config colours</label>
             <label id="mcGeoFilterLabel" for="mcGeoFilter" style="display:none"><input type="checkbox" id="mcGeoFilter"> Mesh live area</label>
+            <label id="mcHomeShadeLabel" for="mcHomeShade" style="display:none"><input type="checkbox" id="mcHomeShade"> <span id="mcHomeShadeText">Shade outside home area</span></label>
           </fieldset>
           <div id="mapAreaFilter"></div>
           <fieldset class="mc-section">
@@ -900,6 +901,23 @@
     if (scopeOverlayEl) {
       scopeOverlayEl.checked = filters.scopeOverlay;
       scopeOverlayEl.addEventListener('change', e => { filters.scopeOverlay = e.target.checked; localStorage.setItem('meshcore-map-scope-overlay', e.target.checked); renderMarkers(); });
+    }
+    // MeshTexas: shade outside the home area (on by default, remembered).
+    {
+      const shadeMap = map;
+      Promise.resolve(window.MeshConfigReady).then(function () {
+        const shadeEl = document.getElementById('mcHomeShade');
+        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade() : null;
+        if (!shadeEl || !shade || !shadeMap || shadeMap !== map) return;
+        document.getElementById('mcHomeShadeText').textContent = 'Shade outside ' + window.homeAreaName();
+        document.getElementById('mcHomeShadeLabel').style.display = '';
+        shadeEl.checked = window.homeAreaShadeEnabled();
+        if (shadeEl.checked) shade.addTo(shadeMap);
+        shadeEl.addEventListener('change', function (e) {
+          try { localStorage.setItem(window.HOME_AREA_SHADE_KEY, e.target.checked); } catch (err) {}
+          if (e.target.checked) shade.addTo(shadeMap); else shadeMap.removeLayer(shade);
+        });
+      }).catch(function () {});
     }
     document.getElementById('mcLastHeard').addEventListener('change', e => { filters.lastHeard = e.target.value; loadNodes(); });
 

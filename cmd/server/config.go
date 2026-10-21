@@ -395,6 +395,9 @@ type HomeAreaConfig struct {
 	Name     string       `json:"name,omitempty"`
 	Polygon  [][2]float64 `json:"polygon"`
 	BufferKm float64      `json:"bufferKm,omitempty"`
+	// Outline is the polygon already grown by BufferKm, used only to draw
+	// the shade outside the home area. Falls back to Polygon when absent.
+	Outline [][2]float64 `json:"outline,omitempty"`
 }
 
 // PathTrustConfig is an alias for the shared packetpath.TrustConfig type
