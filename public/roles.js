@@ -648,18 +648,22 @@
     if (!a || typeof L === 'undefined') return null;
     var hole = (Array.isArray(a.outline) && a.outline.length >= 3) ? a.outline : a.polygon;
     var world = [[85, -180], [85, 180], [-85, 180], [-85, -180]];
+    // Leaflet draws paths only 10% past the viewport; mid zoom-out that edge
+    // shrinks into view and the shade pops back at zoomend. A separate
+    // renderer with a wide margin keeps it covered during the animation.
+    var renderer = L.svg({ padding: 1.5 });
     var root = document.documentElement;
     var dark = root.getAttribute('data-theme') === 'dark' ||
       (root.getAttribute('data-theme') !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
     var outside = L.polygon([world, hole], {
       interactive: false,
       color: dark ? '#94a3b8' : '#64748b', weight: 1, opacity: 0.5, dashArray: '4 4',
-      fillColor: '#000', fillOpacity: dark ? 0.25 : 0.07,
+      fillColor: '#000', fillOpacity: dark ? 0.25 : 0.07, renderer: renderer,
     });
     if (!dark) return outside;
     // Dark tiles are already near black, so darkening the outside barely
     // shows; a faint glow inside the home area carries the contrast instead.
-    var inside = L.polygon(hole, { interactive: false, stroke: false, fillColor: '#fff', fillOpacity: 0.07 });
+    var inside = L.polygon(hole, { interactive: false, stroke: false, fillColor: '#fff', fillOpacity: 0.06, renderer: renderer });
     return L.layerGroup([outside, inside]);
   };
   window.homeAreaShadeEnabled = function () {
@@ -672,6 +676,29 @@
   window.homeAreaLegendText = function () {
     return 'Hollow = located outside ' + _homeAreaName();
   };
+
+  if (typeof L !== 'undefined' && L.GridLayer) {
+    L.GridLayer.include({
+      redraw: function () {
+        if (this._map) {
+          this._removeAllTiles();
+          var tileZoom = Math.round(this._map.getZoom());
+          if ((this.options.maxZoom !== undefined && tileZoom > this.options.maxZoom) ||
+              (this.options.minZoom !== undefined && tileZoom < this.options.minZoom)) {
+            tileZoom = undefined;
+          } else {
+            tileZoom = this._clampZoom(tileZoom);
+          }
+          if (tileZoom !== this._tileZoom) {
+            this._tileZoom = tileZoom;
+            this._updateLevels();
+          }
+          this._update();
+        }
+        return this;
+      }
+    });
+  }
 
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
