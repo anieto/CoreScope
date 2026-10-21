@@ -315,33 +315,44 @@
 
       // DOM surgery: map IDs to human-readable labels, inject separator, set data attributes.
       // We pass raw IDs to Leaflet as keys so e.name is the exact ID without label parsing.
-      try {
-        var firstDarkId = darkIds.length > 0 ? darkIds[0] : null;
-        var labels = _control.getContainer().querySelectorAll('.leaflet-control-layers-base label');
-        for (var i = 0; i < labels.length; i++) {
-          var labelEl = labels[i];
-          var spans = labelEl.querySelectorAll('span');
-          if (spans.length === 0) continue;
+      // MeshTexas: Leaflet re-renders the list whenever a base layer is added or removed
+      // outside a click (theme flips), which dropped these labels, so re-apply after each _update.
+      function _decorateLabels() {
+        try {
+          var firstDarkId = darkIds.length > 0 ? darkIds[0] : null;
+          var labels = _control.getContainer().querySelectorAll('.leaflet-control-layers-base label');
+          for (var i = 0; i < labels.length; i++) {
+            var labelEl = labels[i];
+            var spans = labelEl.querySelectorAll('span');
+            if (spans.length === 0) continue;
 
-          // Target the last span to avoid nuking Leaflet's radio <input>
-          var span = spans[spans.length - 1]; 
+            // Target the last span to avoid nuking Leaflet's radio <input>
+            var span = spans[spans.length - 1]; 
 
-          var id = span.textContent.trim();
-          labelEl.setAttribute('data-tile-id', id);
+            var id = span.textContent.trim();
+            labelEl.setAttribute('data-tile-id', id);
           
-          if (id === AUTO_KEY) {
-            span.innerHTML = AUTO_LABEL;
-          } else if (REGISTRY[id]) {
-            span.innerHTML = ' ' + (REGISTRY[id].label || id);
-          }
+            if (id === AUTO_KEY) {
+              span.innerHTML = AUTO_LABEL;
+            } else if (REGISTRY[id]) {
+              span.innerHTML = ' ' + (REGISTRY[id].label || id);
+            }
           
-          if (id === firstDarkId && lightIds.length > 0) {
-            var sep = document.createElement('div');
-            sep.className = 'leaflet-control-layers-separator';
-            labelEl.parentNode.insertBefore(sep, labelEl);
+            if (id === firstDarkId && lightIds.length > 0) {
+              var sep = document.createElement('div');
+              sep.className = 'leaflet-control-layers-separator';
+              labelEl.parentNode.insertBefore(sep, labelEl);
+            }
           }
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
+      _decorateLabels();
+      var _origUpdate = _control._update;
+      _control._update = function () {
+        var r = _origUpdate.apply(this, arguments);
+        _decorateLabels();
+        return r;
+      };
 
       // Decide initial active layer
       if (_isAuto) {
@@ -361,6 +372,8 @@
 
       map._mcBaselayerchangeHandler = function (e) {
         if (e.name === AUTO_KEY) {
+          _overrideLightId = null;
+          _overrideDarkId = null;
           _activateAuto();
           return;
         }
@@ -405,16 +418,11 @@
     // dark map and then switching the site to light left the dark tiles up.
     // Swap to the pick made for the new theme, or back to Auto if there is none.
     function _onThemeFlip() {
-      if (_isAuto) return;
       var id = _isDarkEffective() ? _overrideDarkId : _overrideLightId;
-      Object.keys(_layerMap).forEach(function (k) {
-        if (k !== id && map.hasLayer(_layerMap[k])) map.removeLayer(_layerMap[k]);
-      });
-      if (id && _layerMap[id]) {
-        if (!map.hasLayer(_layerMap[id])) map.addLayer(_layerMap[id]);
-      } else {
-        _activateAuto();
-      }
+      var explicit = !!(id && REGISTRY[id]);
+      if (!explicit && _isAuto) return;
+      _isAuto = !explicit;
+      _buildControl();
     }
     var _themeObs = (typeof MutationObserver === 'function') ? new MutationObserver(_onThemeFlip) : null;
     if (_themeObs) _themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
