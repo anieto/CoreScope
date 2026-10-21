@@ -401,7 +401,29 @@
 
     // When the site theme flips, update the Auto tile via the existing _syncDarkTiles
     // path (map.js/live.js listen for mc-tile-provider-changed and call _syncDarkTiles).
-    // Nothing extra needed here — autoLayerGroup is managed externally.
+    // MeshTexas: an explicit pick is per theme, though. Without this, picking a
+    // dark map and then switching the site to light left the dark tiles up.
+    // Swap to the pick made for the new theme, or back to Auto if there is none.
+    function _onThemeFlip() {
+      if (_isAuto) return;
+      var id = _isDarkEffective() ? _overrideDarkId : _overrideLightId;
+      Object.keys(_layerMap).forEach(function (k) {
+        if (k !== id && map.hasLayer(_layerMap[k])) map.removeLayer(_layerMap[k]);
+      });
+      if (id && _layerMap[id]) {
+        if (!map.hasLayer(_layerMap[id])) map.addLayer(_layerMap[id]);
+      } else {
+        _activateAuto();
+      }
+    }
+    var _themeObs = (typeof MutationObserver === 'function') ? new MutationObserver(_onThemeFlip) : null;
+    if (_themeObs) _themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    var _themeMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    if (_themeMq && _themeMq.addEventListener) _themeMq.addEventListener('change', _onThemeFlip);
+    if (typeof map.on === 'function') map.on('unload', function () {
+      if (_themeObs) _themeObs.disconnect();
+      if (_themeMq && _themeMq.removeEventListener) _themeMq.removeEventListener('change', _onThemeFlip);
+    });
 
     return _control;
   };
