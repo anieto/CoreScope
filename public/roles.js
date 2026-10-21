@@ -672,6 +672,33 @@
     var inside = L.polygon(hole, { interactive: false, stroke: false, fillColor: '#fff', fillOpacity: 0.06, renderer: renderer });
     return L.layerGroup([outside, inside]);
   };
+  // The shade's look depends on the theme, so rebuild it whenever the theme
+  // changes; otherwise a light/dark toggle left the other theme's shade on
+  // the map until a reload.
+  window.attachHomeAreaShade = function (map) {
+    var layer = null, on = false;
+    function rebuild() {
+      try {
+        if (layer) { map.removeLayer(layer); layer = null; }
+        if (on) {
+          layer = window.makeHomeAreaShade(map);
+          if (layer) layer.addTo(map);
+        }
+      } catch (e) {
+        stop(); // the map is gone (page left); stop listening
+      }
+    }
+    var obs = new MutationObserver(rebuild);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    if (mq && mq.addEventListener) mq.addEventListener('change', rebuild);
+    function stop() {
+      obs.disconnect();
+      if (mq && mq.removeEventListener) mq.removeEventListener('change', rebuild);
+    }
+    map.on('unload', stop);
+    return { set: function (v) { on = !!v; rebuild(); } };
+  };
   window.homeAreaShadeEnabled = function () {
     try { return localStorage.getItem(window.HOME_AREA_SHADE_KEY) !== 'false'; } catch (e) { return true; }
   };

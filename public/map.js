@@ -907,15 +907,15 @@
       const shadeMap = map;
       Promise.resolve(window.MeshConfigReady).then(function () {
         const shadeEl = document.getElementById('mcHomeShade');
-        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade(shadeMap) : null;
-        if (!shadeEl || !shade || !shadeMap || shadeMap !== map) return;
+        if (!shadeEl || !window.MC_HOME_AREA || !window.attachHomeAreaShade || !shadeMap || shadeMap !== map) return;
+        const shade = window.attachHomeAreaShade(shadeMap);
         document.getElementById('mcHomeShadeText').textContent = 'Shade outside ' + window.homeAreaName();
         document.getElementById('mcHomeShadeLabel').style.display = '';
         shadeEl.checked = window.homeAreaShadeEnabled();
-        if (shadeEl.checked) shade.addTo(shadeMap);
+        shade.set(shadeEl.checked);
         shadeEl.addEventListener('change', function (e) {
           try { localStorage.setItem(window.HOME_AREA_SHADE_KEY, e.target.checked); } catch (err) {}
-          if (e.target.checked) shade.addTo(shadeMap); else shadeMap.removeLayer(shade);
+          shade.set(e.target.checked);
         });
       }).catch(function () {});
     }

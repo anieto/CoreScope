@@ -1442,9 +1442,8 @@
     {
       const shadeMap = map;
       Promise.resolve(window.MeshConfigReady).then(function () {
-        if (shadeMap !== map || !window.homeAreaShadeEnabled || !window.homeAreaShadeEnabled()) return;
-        const shade = window.makeHomeAreaShade ? window.makeHomeAreaShade(shadeMap) : null;
-        if (shade) shade.addTo(shadeMap);
+        if (shadeMap !== map || !window.MC_HOME_AREA || !window.attachHomeAreaShade || !window.homeAreaShadeEnabled()) return;
+        window.attachHomeAreaShade(shadeMap).set(true);
       }).catch(function () {});
     }
 
