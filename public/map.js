@@ -2156,7 +2156,7 @@
       var markerAlt = (node.name || 'Unknown') + ' (' + (node.role || 'node') + (isAlsoObserver ? ' + observer' : '') + ')' +
         (scopeLabel ? ', scope config ' + scopeLabel : '') +
         (isOutside ? ', ' + window.homeAreaOutsideText() : '');
-      allMarkers.push({ latLng, node, icon, isLabel: useLabel, popupFn: function() { return buildPopup(node); }, alt: markerAlt, title: (scopeLabel || isOutside) ? markerAlt : '' });
+      allMarkers.push({ latLng, node, icon, isLabel: useLabel, isOutside, popupFn: function() { return buildPopup(node); }, alt: markerAlt, title: (scopeLabel || isOutside) ? markerAlt : '' });
     }
 
     // Add observer markers (skip observers already represented as a node marker)
@@ -2196,6 +2196,7 @@
       const marker = L.marker(pos, { icon: m.icon, alt: m.alt, title: m.title || '' });
       marker._nodeKey = m.node.public_key || m.node.id || null;
       marker._role = (m.node && m.node.role) || 'companion';
+      marker._outside = !!m.isOutside;
       marker.bindPopup(m.popupFn(), { maxWidth: 280 });
       m._leafletMarker = marker;
       m._leafletLine = null;
@@ -2787,7 +2788,9 @@
   function makeClusterIcon(cluster) {
     var markers = cluster.getAllChildMarkers();
     var counts = { repeater: 0, companion: 0, room: 0, sensor: 0, observer: 0 };
+    var outsideCount = 0;
     for (var i = 0; i < markers.length; i++) {
+      if (markers[i]._outside) outsideCount += 1;
       var r = markers[i]._role || 'companion';
       if (counts[r] == null) counts[r] = 0;
       counts[r] += 1;
@@ -2795,6 +2798,9 @@
     var total = (typeof cluster.getChildCount === 'function') ? cluster.getChildCount() : markers.length;
     var bucket = total >= 100 ? 'lg' : total >= 30 ? 'md' : 'sm';
     var roleOrder = ['repeater', 'companion', 'room', 'sensor', 'observer'];
+    // MeshTexas: a cluster made only of nodes outside the home area draws
+    // hollow, matching the hollow node markers.
+    var allOutside = markers.length > 0 && outsideCount === markers.length;
     // #1356 V2: pill background uses the --mc-role-* Wong palette (CSS var),
     // pill text is the role letter (primary, monochrome-safe carrier).
     // #1407: pill text COLOR now comes from --mc-role-X-text (set by
@@ -2829,9 +2835,13 @@
         // #1360 follow-up: cap 4+ digit counts as "999+" to bound pill width.
         // Defense-in-depth: .mc-pill CSS also enforces max-width + ellipsis.
         if (n > 999) n = '999+';
+        // Hollow pill for an all-outside cluster: dark fill, role-colour ring + text.
+        var pillBg = allOutside ? 'var(--mc-cluster-fill)' : bg;
+        var pillRing = allOutside ? ';box-shadow:inset 0 0 0 1.5px ' + bg : '';
+        if (allOutside) fg = bg;
         pillsHtml += '<span class="mc-pill role-' + role + '" ' +
                      'role="img" aria-label="' + n + ' ' + role + (n === 1 ? '' : 's') + '" ' +
-                     'style="background:' + bg + ';color:' + fg + '" ' +
+                     'style="background:' + pillBg + ';color:' + fg + pillRing + '" ' +
                      'title="' + n + ' ' + role + (n === 1 ? '' : 's') + '">' +
                      letter + n + '</span>';
         pillsShown += 1;
@@ -2839,8 +2849,9 @@
     }
     // #1356 V1: cluster gets role="img" + an aria-label summarising the
     // count and per-role breakdown so screen readers announce the data.
-    var ariaLabel = total + ' nodes — ' + tooltipParts.join(', ');
-    var html = '<div class="mc-cluster mc-' + bucket + '" ' +
+    var ariaLabel = total + ' nodes — ' + tooltipParts.join(', ') +
+      (outsideCount && window.homeAreaName ? ' (' + outsideCount + ' located outside ' + window.homeAreaName() + ')' : '');
+    var html = '<div class="mc-cluster mc-' + bucket + (allOutside ? ' mc-outside' : '') + '" ' +
                  'role="img" aria-label="' + ariaLabel + '">' +
                  '<b class="mc-count" aria-hidden="true">' + total + '</b>' +
                  '<div class="mc-pills" aria-hidden="true">' + pillsHtml + '</div>' +

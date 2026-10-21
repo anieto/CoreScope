@@ -638,6 +638,7 @@
     var a = window.MC_HOME_AREA;
     return String((a && a.name) || 'the home area').replace(/[<>&"]/g, '');
   }
+  window.homeAreaName = _homeAreaName;
   window.homeAreaOutsideText = function () {
     var name = _homeAreaName();
     return 'Located outside ' + name + ' \u00b7 heard by ' + name + ' observers';

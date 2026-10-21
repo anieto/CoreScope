@@ -5877,3 +5877,4 @@ body.embed #app.app-fixed {
 .home-area-outside-note { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 .home-area-legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); margin-top: 4px; }
 .badge-outside { background: transparent; color: var(--text-muted); border: 1px solid var(--border); font-size: 10px; }
+.mc-cluster.mc-outside { background: rgba(33, 41, 54, 0.4); text-shadow: 0 0 3px rgba(0, 0, 0, 0.9); }
