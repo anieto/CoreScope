@@ -180,7 +180,14 @@ async function api(path, { ttl = 0, bust = false } = {}) {
           attempt++;
           continue;
         }
-        if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+        if (!res.ok) {
+          // status and Retry-After ride on the error so a caller can decide to
+          // retry; api() itself retries only the 503 warm-up above.
+          const err = new Error(`API ${res.status}: ${path}`);
+          err.status = res.status;
+          err.retryAfter = res.headers.get('Retry-After');
+          throw err;
+        }
         const data = await res.json();
         const ms = performance.now() - t0;
         _apiPerf.calls++;
@@ -203,7 +210,9 @@ async function api(path, { ttl = 0, bust = false } = {}) {
     }
   })();
   _inflight.set(path, promise);
-  promise.finally(() => _inflight.delete(path));
+  // The cleanup chain must not reject on its own: callers handle the error
+  // through `promise`, and an unhandled copy logs 'Uncaught (in promise)'.
+  promise.finally(() => _inflight.delete(path)).catch(() => {});
   return promise;
 }
 
@@ -1156,6 +1165,13 @@ registerPage('tools-landing', {
 
 let currentPage = null;
 
+// Bumped on every page init, so async page work can tell its visit is over:
+// capture viewGeneration() at init and drop the result when it has moved on
+// (#2218, #2230, #2200). A route change to another node of the same page
+// type is a new visit too.
+let _viewGeneration = 0;
+function viewGeneration() { return _viewGeneration; }
+
 function closeNav() {
   document.querySelector('.nav-links')?.classList.remove('open');
   document.body.classList.remove('nav-open');
@@ -1254,6 +1270,7 @@ function navigate() {
     moreBtn.classList.toggle('active', !!hasActiveMore);
   }
 
+  _viewGeneration++;
   if (currentPage && pages[currentPage]?.destroy) {
     pages[currentPage].destroy();
   }
@@ -1325,10 +1342,14 @@ window.addEventListener('DOMContentLoaded', () => {
   const darkToggle = document.getElementById('darkModeToggle');
   const darkCheckbox = document.getElementById('darkModeCheckbox');
   const savedTheme = localStorage.getItem('meshcore-theme');
-  function applyTheme(theme) {
+  // #2236: ?theme= from the URL (parsed in index.html) holds for this page
+  // load and is never saved, so the stored choice and the account stay as
+  // they were. A click on the toggle is an explicit choice and ends it.
+  let themeOverride = window.__themeOverride || null;
+  function applyTheme(theme, persist) {
     document.documentElement.setAttribute('data-theme', theme);
     if (darkCheckbox) darkCheckbox.checked = theme === 'dark';
-    localStorage.setItem('meshcore-theme', theme);
+    if (persist !== false) localStorage.setItem('meshcore-theme', theme);
     // Re-apply user theme CSS vars for the correct mode (light/dark)
     reapplyUserThemeVars(theme === 'dark');
   }
@@ -1367,8 +1388,10 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     } catch (e) { console.error('[theme] reapply error:', e); }
   }
-  // On load: respect saved pref, else OS pref, else light
-  if (savedTheme) {
+  // On load: URL override, else saved pref, else OS pref, else light
+  if (themeOverride) {
+    applyTheme(themeOverride, false);
+  } else if (savedTheme) {
     applyTheme(savedTheme);
   } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
     applyTheme('dark');
@@ -1377,12 +1400,14 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   if (darkCheckbox) {
     darkCheckbox.addEventListener('change', () => {
+      themeOverride = null;
       applyTheme(darkCheckbox.checked ? 'dark' : 'light');
     });
   } else {
     // Fallback for button-style toggle (upstream compatibility)
     darkToggle.addEventListener('click', () => {
       const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      themeOverride = null;
       applyTheme(isDark ? 'light' : 'dark');
     });
   }
@@ -1392,6 +1417,7 @@ window.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('storage', function (ev) {
     if (!ev || ev.key !== 'meshcore-theme' || !ev.newValue) return;
     if (ev.newValue !== 'dark' && ev.newValue !== 'light') return;
+    if (themeOverride) return;
     document.documentElement.setAttribute('data-theme', ev.newValue);
     if (darkCheckbox) darkCheckbox.checked = ev.newValue === 'dark';
     try { reapplyUserThemeVars(ev.newValue === 'dark'); } catch (_) {}
@@ -1823,10 +1849,12 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!q) { searchResults.innerHTML = ''; return; }
     searchTimeout = setTimeout(async () => {
       try {
-        const [packets, nodes, channels] = await Promise.all([
+        const [packets, nodes, channels, reported] = await Promise.all([
           fetch('/api/packets?limit=5&hash=' + encodeURIComponent(q)).then(r => r.json()).catch(() => ({ packets: [] })),
           fetch('/api/nodes?search=' + encodeURIComponent(q)).then(r => r.json()).catch(() => []),
-          fetch('/api/channels').then(r => r.json()).catch(() => [])
+          fetch('/api/channels').then(r => r.json()).catch(() => []),
+          // Repeaters known only from their reported name are not in /api/nodes.
+          window.ReportedNodes ? window.ReportedNodes.load() : Promise.resolve({ nodes: [] })
         ]);
         let html = '';
         const pktList = packets.packets || packets;
@@ -1843,6 +1871,7 @@ window.addEventListener('DOMContentLoaded', () => {
               <span class="search-result-type">Node</span>${escapeHtml(n.name)} — ${truncate(n.public_key || '', 16)}</div>`;
           }
         }
+        if (window.ReportedNodes) html += window.ReportedNodes.searchItemsHtml(reported.nodes, q, 5);
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {

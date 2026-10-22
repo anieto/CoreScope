@@ -282,6 +282,14 @@ func main() {
 		log.Printf("Running — %d MQTT source(s) connected", connectedCount)
 	}
 
+	// Opt-in reach hop index: installs it, or removes it when off (the default).
+	// Here, with the MQTT subscription up and the ingest gate still closed: a
+	// removal holds the single writer for about a minute on a large database,
+	// and the buffer keeps that minute's packets instead of losing them.
+	if err := store.ConfigureObservationHops(cfg.HopIndexDaysOrZero()); err != nil {
+		log.Fatalf("db: hop index: %v", err)
+	}
+
 	// Node retention: move stale nodes to inactive_nodes on startup
 	nodeDays := cfg.NodeDaysOrDefault()
 	store.MoveStaleNodes(nodeDays)
@@ -313,6 +321,13 @@ func main() {
 		} else if n > 0 {
 			log.Printf("[prune] startup pruned %d transmissions older than %d days", n, packetDays)
 		}
+	}
+
+	// Keep observation_hops bounded to its window (no-op when the index is off).
+	if n, err := store.TrimObservationHops(); err != nil {
+		log.Printf("[hop-index] trim error: %v", err)
+	} else if n > 0 {
+		log.Printf("[hop-index] startup trimmed %d hop rows", n)
 	}
 
 	// Client-RX coverage retention: bound the opt-in coverage tables (#1727).
@@ -362,6 +377,17 @@ func main() {
 		}
 	}
 
+	// Node-name retention: bounds the opt-in client_node_names table.
+	// 0 = disabled.
+	clientNodeNamesDays := cfg.ClientNodeNamesDaysOrZero()
+	if clientNodeNamesDays > 0 {
+		if n, err := store.PruneOldClientNodeNames(clientNodeNamesDays); err != nil {
+			log.Printf("[prune] client_node_names: %v", err)
+		} else if n > 0 {
+			log.Printf("[prune] startup pruned %d client_node_names older than %d days", n, clientNodeNamesDays)
+		}
+	}
+
 	vacuumPages := cfg.IncrementalVacuumPages()
 	store.RunIncrementalVacuum(vacuumPages)
 
@@ -384,6 +410,9 @@ func main() {
 	keyBackfillCtx, stopKeyBackfill := context.WithCancel(context.Background())
 	defer stopKeyBackfill()
 	keyBackfillDone := keyBackfill.Start(keyBackfillCtx)
+	// After the gate: ingest is live, the backfill yields to it between chunks.
+	// No-op when the index is off or already covers its window.
+	store.ScheduleObservationHopsBackfill()
 	if d := ingestBuffer.Dropped(); d > 0 {
 		log.Printf("[ingest-buffer] write path ready; draining backlog (dropped %d during startup — consider raising ingestBufferSize)", d)
 	} else {
@@ -423,6 +452,19 @@ func main() {
 		}
 	}()
 
+	// Daily trim of the reach hop index, independent of packet retention.
+	if cfg.HopIndexDaysOrZero() > 0 {
+		go func() {
+			for range time.Tick(24 * time.Hour) {
+				if n, err := store.TrimObservationHops(); err != nil {
+					log.Printf("[hop-index] trim error: %v", err)
+				} else if n > 0 {
+					log.Printf("[hop-index] trimmed %d hop rows", n)
+				}
+			}
+		}()
+	}
+
 	// Daily ticker for transmission retention (#1283).
 	var packetRetentionTicker *time.Ticker
 	if packetDays > 0 {
@@ -444,7 +486,7 @@ func main() {
 	// node_declared_regions retention (Task 6) rather than starting a second
 	// ticker — the four flags are independent (0 disables each separately),
 	// so the ticker itself must run when any is set.
-	if clientRxDays > 0 || clientRxObsDays > 0 || clientRfDays > 0 || clientRegionsDays > 0 {
+	if clientRxDays > 0 || clientRxObsDays > 0 || clientRfDays > 0 || clientRegionsDays > 0 || clientNodeNamesDays > 0 {
 		clientRxRetentionTicker := time.NewTicker(24 * time.Hour)
 		go func() {
 			for range clientRxRetentionTicker.C {
@@ -476,6 +518,13 @@ func main() {
 						store.RunIncrementalVacuum(vacuumPages)
 					}
 				}
+				if clientNodeNamesDays > 0 {
+					if n, err := store.PruneOldClientNodeNames(clientNodeNamesDays); err != nil {
+						log.Printf("[prune] client_node_names: %v", err)
+					} else if n > 0 {
+						store.RunIncrementalVacuum(vacuumPages)
+					}
+				}
 			}
 		}()
 		if clientRxDays > 0 {
@@ -489,6 +538,9 @@ func main() {
 		}
 		if clientRegionsDays > 0 {
 			log.Printf("[prune] auto-prune enabled: node_declared_regions older than %d days will be removed daily", clientRegionsDays)
+		}
+		if clientNodeNamesDays > 0 {
+			log.Printf("[prune] auto-prune enabled: client_node_names older than %d days will be removed daily", clientNodeNamesDays)
 		}
 	}
 
@@ -867,7 +919,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 
 	// Mobile client topics: meshcore/client/{PUBLIC_KEY}/packets (RX coverage),
 	// meshcore/client/{PUBLIC_KEY}/rf (RF environment samples), and
-	// meshcore/client/{PUBLIC_KEY}/regions (declared-region answers). A
+	// meshcore/client/{PUBLIC_KEY}/regions (declared-region answers), and
+	// meshcore/client/{PUBLIC_KEY}/names (a repeater's own name). A
 	// roaming companion reports where it directly heard a node, its own
 	// radio's counters, or a repeater's declared region list; all three are
 	// handled in isolation from the observer/observations path. EMQX ACL
@@ -907,6 +960,10 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		case "regions":
 			if cfg.ClientRegionsEnabled() {
 				handleClientRegions(store, cfg, tag, parts[2], msg)
+			}
+		case "names":
+			if cfg.ClientNodeNamesEnabled() {
+				handleClientNodeNames(store, tag, parts[2], msg)
 			}
 		}
 		return
