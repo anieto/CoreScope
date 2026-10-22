@@ -1808,7 +1808,7 @@
     // City-center lat/lon for each MeshTexas IATA region, used only to
     // geographically reclassify nodes for the recenter/zoom below — NOT
     // used for the region filter's actual show/hide logic, which stays
-    // observer-tag-based (server-side) as before. Same 13 codes/coords as
+    // observer-tag-based (server-side) as before. Same codes/coords as
     // livemap's REGION_CENTROIDS table.
     var REGION_CENTROIDS = {
       AUS: [30.2672, -97.7431],
@@ -1826,6 +1826,9 @@
       ACT: [31.5493, -97.1467],
       LBB: [33.5779, -101.8552],
       MAF: [31.9200, -102.2200], // between Midland and Odessa
+      DRT: [29.3709, -100.8959],
+      UVA: [28.9500, -100.0500], // between Uvalde, Eagle Pass and Crystal City
+      LRD: [27.5306, -99.4803],
     };
 
     // Nearest-centroid classification by the node's own lat/lon (squared-
@@ -1973,8 +1976,20 @@
       // Prime the coordinate cache immediately, then keep it fresh — same
       // 5-minute cadence as the other slow-moving background recomputers
       // (bridge/coverage/redundancy scores) on the server side.
-      loadAllNodeCoords();
+      var initialCoords = loadAllNodeCoords();
       setInterval(loadAllNodeCoords, 5 * 60 * 1000);
+      // MeshTexas: a ?region= link (e.g. from meshtexas.org/communities) is
+      // already selected when the page loads, so onChange below never fires
+      // for it and the map stayed at the default view. Frame it once node
+      // coords are in, unless the URL also pins a lat/lon/zoom viewport.
+      var urlRegion = new URLSearchParams(location.hash.split('?')[1] || '').get('region');
+      var urlViewport = (typeof parseViewportHash === 'function') ? parseViewportHash(location.hash) : null;
+      if (urlRegion && !urlViewport) {
+        initialCoords.then(function() {
+          var sel = RegionFilter.getSelected();
+          if (sel) recenterMapToRegion(sel);
+        });
+      }
       regionFilterChangeHandler = RegionFilter.onChange(async function(selected) {
         // Recenter no longer waits on the region-scoped /api/nodes reload
         // below — it only needs allNodeCoords, which is independent of the
