@@ -48,6 +48,7 @@
   // recenter would mean recentering against the PREVIOUS region's nodes
   // while the new region's fetch is still in flight.
   let allNodeCoords = {};
+  let allNodeCoordsReady = null; // first loadAllNodeCoords(), for the ?region= framing
   let packetCount = 0;
   let activeAnims = 0;
   const MAX_CONCURRENT_ANIMS = 20;
@@ -1976,20 +1977,8 @@
       // Prime the coordinate cache immediately, then keep it fresh — same
       // 5-minute cadence as the other slow-moving background recomputers
       // (bridge/coverage/redundancy scores) on the server side.
-      var initialCoords = loadAllNodeCoords();
+      allNodeCoordsReady = loadAllNodeCoords();
       setInterval(loadAllNodeCoords, 5 * 60 * 1000);
-      // MeshTexas: a ?region= link (e.g. from meshtexas.org/communities) is
-      // already selected when the page loads, so onChange below never fires
-      // for it and the map stayed at the default view. Frame it once node
-      // coords are in, unless the URL also pins a lat/lon/zoom viewport.
-      var urlRegion = new URLSearchParams(location.hash.split('?')[1] || '').get('region');
-      var urlViewport = (typeof parseViewportHash === 'function') ? parseViewportHash(location.hash) : null;
-      if (urlRegion && !urlViewport) {
-        initialCoords.then(function() {
-          var sel = RegionFilter.getSelected();
-          if (sel) recenterMapToRegion(sel);
-        });
-      }
       regionFilterChangeHandler = RegionFilter.onChange(async function(selected) {
         // Recenter no longer waits on the region-scoped /api/nodes reload
         // below — it only needs allNodeCoords, which is independent of the
@@ -2602,8 +2591,18 @@
     // localStorage. Validated via shared parseViewportHash helper.
     const urlVp = (typeof parseViewportHash === 'function')
       ? parseViewportHash(location.hash) : null;
+    // MeshTexas: a ?region= link (e.g. from meshtexas.org/communities) is
+    // already selected when the page loads, so the recenter on region change
+    // never fires for it. Frame the region instead of restoring the saved
+    // view, once node coords are in.
+    const urlRegion = new URLSearchParams(location.hash.split('?')[1] || '').get('region');
     if (urlVp) {
       map.setView([urlVp.lat, urlVp.lon], urlVp.zoom);
+    } else if (urlRegion && window.RegionFilter) {
+      Promise.resolve(allNodeCoordsReady).then(function() {
+        const sel = RegionFilter.getSelected();
+        if (sel) recenterMapToRegion(sel);
+      });
     } else {
       const savedView = localStorage.getItem('live-map-view');
       if (savedView) {
