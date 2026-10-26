@@ -569,7 +569,7 @@ func (s *Server) clientUserManagement() *ClientUserManagement {
 	if s.auth == nil {
 		return nil
 	}
-	return &ClientUserManagement{Enabled: true, ChannelProposals: s.auth.set.proposals.enabled, Notifications: s.auth.notify != nil, CompanionLinking: true}
+	return &ClientUserManagement{Enabled: true, ChannelProposals: s.auth.set.proposals.enabled, Notifications: s.auth.notify != nil, CompanionLinking: true, ObserverLogins: s.auth.set.observerLogins.enabled}
 }
 
 func (s *Server) handleConfigAreas(w http.ResponseWriter, r *http.Request) {
@@ -2609,6 +2609,12 @@ func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request)
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
 	if s.store != nil {
+		// A failed initial load cannot finish the lazy build. A completed hot
+		// window remains usable even if its later background fill fails.
+		if s.store.backgroundLoadDone.Load() && s.store.backgroundLoadFailed.Load() && !s.store.LoadComplete() {
+			writeError(w, http.StatusInternalServerError, "Distance analytics unavailable: initial packet load failed")
+			return
+		}
 		// Lazy build (#1011): distance index is not built at startup.
 		// First request triggers an async build and gets 202 +
 		// Retry-After; concurrent requests during the build window

@@ -166,12 +166,14 @@ jobs:
           # cache, so a key that misses on an unrelated module hurts.
           cache-dependency-path: "**/go.sum"
 
+      - name: Run JS unit tests
+        run: sh test-all.sh
+
       - name: Enforce gofmt + go vet (issue #1859)
         run: |
           set -e
-          # gofmt: every tracked *.go file except the misnamed Dockerfile.go,
-          # which is a Dockerfile (FROM ...) that gofmt cannot parse.
-          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -vi 'Dockerfile.go'))
+          # gofmt: every tracked *.go file.
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt required on these files:"
             echo "$unformatted"
@@ -253,9 +255,6 @@ jobs:
           set -e
           node scripts/check-css-vars.js
           node scripts/test-check-css-vars.js
-
-      - name: Run JS unit tests
-        run: sh test-all.sh
 
       - name: 🛡️ Preflight XSS gate — actual --diff check (PR only)
         # The fixture self-test above (test-preflight-xss-gate.js) only
@@ -533,7 +532,13 @@ jobs:
               "publicBaseUrl": "http://localhost:13582",
               "mail": { "provider": "fake", "fromEmail": "noreply@e2e.test" },
               "channelProposals": { "enabled": true },
-              "notifications": { "enabled": true }
+              "notifications": { "enabled": true },
+              "observerLogins": {
+                "enabled": true,
+                "hookSecret": "e2e-hook-secret-0123",
+                "encryptionKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+                "broker": { "host": "mqtt.e2e.test" }
+              }
             }
           }
           JSON
@@ -681,6 +686,7 @@ jobs:
           suite 2 test-issue-1630-reach-mobile-e2e.js CHROMIUM_REQUIRE=1 BASE_URL=$B
           suite 1 test-node-reach-coverage-e2e.js CHROMIUM_REQUIRE=1 BASE_URL=$B
           suite 3 test-issue-1640-compare-discovery-e2e.js CHROMIUM_REQUIRE=1 BASE_URL=$B
+          suite 3 test-observer-detail-ownership-e2e.js BASE_URL=$B
           suite 2 test-neighbor-map-btn-clip-e2e.js CHROMIUM_REQUIRE=1
           suite 3 test-rx-coverage-viewport-e2e.js BASE_URL=$B
           suite 1 test-rx-coverage-noise-e2e.js BASE_URL=$B

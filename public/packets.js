@@ -753,9 +753,16 @@
   function typeName(t) { return TYPE_NAMES[t] ?? `Type ${t}`; }
   const isMobile = window.innerWidth <= 1024;
   const PACKET_LIMIT = isMobile ? 1000 : 50000;
-  let savedTimeWindowMin = Number(localStorage.getItem('meshcore-time-window'));
-  if (!Number.isFinite(savedTimeWindowMin) || savedTimeWindowMin <= 0) savedTimeWindowMin = 15;
-  if (isMobile && savedTimeWindowMin > 180) savedTimeWindowMin = 15;
+  const DEFAULT_TIME_WINDOW = 15;
+  function normalizeTimeWindow(value, fallback = DEFAULT_TIME_WINDOW) {
+    // Only an explicit zero means All time; absent/empty preferences do not.
+    if (value == null || String(value).trim() === '') return fallback;
+    const minutes = Number(value);
+    if (!Number.isFinite(minutes) || minutes < 0) return fallback;
+    if (isMobile && (minutes === 0 || minutes > 180)) return DEFAULT_TIME_WINDOW;
+    return minutes;
+  }
+  let savedTimeWindowMin = normalizeTimeWindow(localStorage.getItem('meshcore-time-window'));
   let totalCount = 0;
   let expandedHashes = new Set();
   let hopNameCache = {};
@@ -775,11 +782,9 @@
   let _regionChangeHandler = null;
   let _areaChangeHandler = null;
 
-  var DEFAULT_TIME_WINDOW = 15;
-
   function buildPacketsQuery(timeWindowMin, regionParam, skipHash) {
     var parts = [];
-    if (timeWindowMin && timeWindowMin !== DEFAULT_TIME_WINDOW) parts.push('timeWindow=' + timeWindowMin);
+    if (timeWindowMin != null && timeWindowMin !== DEFAULT_TIME_WINDOW) parts.push('timeWindow=' + timeWindowMin);
     if (regionParam) parts.push('region=' + encodeURIComponent(regionParam));
     if (!skipHash && filters.hash) parts.push('hash=' + encodeURIComponent(filters.hash));
     if (filters.node) parts.push('node=' + encodeURIComponent(filters.node));
@@ -905,6 +910,7 @@
       var layout = panel.closest('.split-layout');
       if (layout) layout.classList.add('detail-collapsed');
       selectedId = null;
+      if (window.setRouteTitle) window.setRouteTitle('packets');
       renderTableRows();
     }
   }
@@ -1335,10 +1341,9 @@
     } else {
       showFullNames = localStorage.getItem('meshcore-full-names') === 'true';
     }
-    var _urlTimeWindow = Number(_initUrlParams.get('timeWindow'));
-    if (Number.isFinite(_urlTimeWindow) && _urlTimeWindow > 0) {
-      savedTimeWindowMin = _urlTimeWindow;
-      localStorage.setItem('meshcore-time-window', String(_urlTimeWindow));
+    if (_initUrlParams.has('timeWindow')) {
+      savedTimeWindowMin = normalizeTimeWindow(_initUrlParams.get('timeWindow'), savedTimeWindowMin);
+      localStorage.setItem('meshcore-time-window', String(savedTimeWindowMin));
     }
     var _urlHash = _initUrlParams.get('hash');
     if (_urlHash) filters.hash = _urlHash;
@@ -1678,8 +1683,7 @@
 
   async function loadPackets() {
     try {
-      const selectedWindow = Number(document.getElementById('fTimeWindow')?.value);
-      const windowMin = Number.isFinite(selectedWindow) ? selectedWindow : savedTimeWindowMin;
+      const windowMin = normalizeTimeWindow(document.getElementById('fTimeWindow')?.value, savedTimeWindowMin);
       const params = buildPacketsParams({
         filters,
         regionParam: RegionFilter.getRegionParam(),
@@ -2232,8 +2236,8 @@
     const fTimeWindow = document.getElementById('fTimeWindow');
     fTimeWindow.value = String(savedTimeWindowMin);
     fTimeWindow.addEventListener('change', () => {
-      savedTimeWindowMin = Number(fTimeWindow.value);
-      if (!Number.isFinite(savedTimeWindowMin) || savedTimeWindowMin <= 0) savedTimeWindowMin = 15;
+      savedTimeWindowMin = normalizeTimeWindow(fTimeWindow.value);
+      fTimeWindow.value = String(savedTimeWindowMin);
       localStorage.setItem('meshcore-time-window', fTimeWindow.value);
       updatePacketsUrl();
       loadPackets();
@@ -3485,6 +3489,7 @@
   let selectedObservationId = null;
 
   async function selectPacket(id, hash, prefetchedData, obsRowId) {
+    if (window.setRouteTitle) window.setRouteTitle('packets', String(hash || id));
     selectedId = id;
     selectedObservationId = obsRowId || null;
     const obsParam = selectedObservationId ? `?obs=${selectedObservationId}` : '';
@@ -3493,6 +3498,7 @@
     } else {
       history.replaceState(null, '', `#/packets/${id}${obsParam}`);
     }
+    updatePacketsUrl();
     renderTableRows();
     const isMobileNow = window.innerWidth <= 640;
     // #1168 review note: this branch is intentionally narrower than nodes.js /
@@ -3526,6 +3532,7 @@
           selectedId = null;
           selectedObservationId = null;
           history.replaceState(null, '', '#/packets');
+          if (window.setRouteTitle) window.setRouteTitle('packets');
           renderTableRows();
         }
       });
@@ -3541,9 +3548,11 @@
         document.body.appendChild(sheet);
         sheet.querySelector('#mobileSheetClose').addEventListener('click', () => {
           sheet.classList.remove('open');
+          if (window.setRouteTitle) window.setRouteTitle('packets');
         });
         sheet.querySelector('.mobile-sheet-handle').addEventListener('click', () => {
           sheet.classList.remove('open');
+          if (window.setRouteTitle) window.setRouteTitle('packets');
         });
       }
       panel = sheet.querySelector('.mobile-sheet-content');
@@ -3891,6 +3900,7 @@
         const pktHash = pkt.hash || pkt.id;
         const obsParam = obsId ? `?obs=${obsId}` : '';
         history.replaceState(null, '', `#/packets/${pktHash}${obsParam}`);
+        updatePacketsUrl();
         renderDetail(panel, data, obsId);
       });
     });

@@ -819,7 +819,7 @@
     // MeshTexas: home area (polygon + buffer); nodes outside it draw hollow.
     window.MC_HOME_AREA = (cfg.homeArea && Array.isArray(cfg.homeArea.polygon) && cfg.homeArea.polygon.length >= 3) ? cfg.homeArea : null;
     // Optional user management: present only when the server enables it.
-    window.MC_USER_MGMT = (cfg.userManagement && cfg.userManagement.enabled) ? { enabled: true, channelProposals: !!cfg.userManagement.channelProposals, notifications: !!cfg.userManagement.notifications } : null;
+    window.MC_USER_MGMT = (cfg.userManagement && cfg.userManagement.enabled) ? { enabled: true, channelProposals: !!cfg.userManagement.channelProposals, notifications: !!cfg.userManagement.notifications, observerLogins: !!cfg.userManagement.observerLogins } : null;
     // #1574 — operator-configurable cap on /live map node count.
     if (cfg.liveMapMaxNodes != null) window.LIVE_MAP_MAX_NODES = cfg.liveMapMaxNodes;
     // #1784 — path trust threshold: minimum hash bytes for mapping evidence.
