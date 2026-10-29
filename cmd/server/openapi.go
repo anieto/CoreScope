@@ -87,7 +87,7 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/account/companions":                      {Summary: "List own linked companions", Description: "[{pubkey, name, linkedAt, lastSeenAt}], newest link first. lastSeenAt is the newest client reception of that companion (rx_at as stored) or null. Accepts a device token.", Tag: "users", Session: true},
 		"DELETE /api/account/companions/{pubkey}":          {Summary: "Unlink an own companion", Description: "204. Stored coverage stays. 400 malformed pubkey, 404 not linked to the caller. Accepts a device token.", Tag: "users", Session: true},
 		"GET /api/account/observer-login":                  {Summary: "Own observer MQTT login", Description: "{login: null} or {login: {username, createdAt, revoked}, observers: [{pubkey, name, lastSeenAt}]}. observers are the pubkeys bound to the caller (the first time an observer publishes with the login); name and lastSeenAt come from the analyzer observers (empty name and null lastSeenAt when unknown). Never contains the password, its hash or its ciphertext. Routes exist only when userManagement.observerLogins is enabled. Not available to device tokens.", Tag: "users", Session: true},
-		"POST /api/account/observer-login":                 {Summary: "Request an observer MQTT login", Description: "Generates a username and password, stores the password hashed and sealed, and mails the credentials to the account address in four formats (meshcoretomqtt, Gessaman or Dutch-MeshCore observer firmware, Home Assistant meshcore-ha, plain). 201 {sent: true}: the response never carries the credentials. 409 when the caller already has a login, 403 when it was revoked, 503 when the mail could not be sent (the login exists; use resend) or the feature failed to load.", Tag: "users", Session: true},
+		"POST /api/account/observer-login":                 {Summary: "Request an observer MQTT login", Description: "Generates a username and password, stores the password hashed and sealed, and mails the credentials to the account address in five formats (meshcoretomqtt, Gessaman or Dutch-MeshCore observer firmware, Home Assistant meshcore-ha, OpenHop, plain). 201 {sent: true}: the response never carries the credentials. 409 when the caller already has a login, 403 when it was revoked, 503 when the mail could not be sent (the login exists; use resend) or the feature failed to load.", Tag: "users", Session: true},
 		"POST /api/account/observer-login/resend":          {Summary: "Mail the observer MQTT credentials again", Description: "Mails the same credentials again. 200 {sent: true}. 404 without a login, 403 when revoked, 429 after 3 credential mails in 24 hours (the first mail counts; Retry-After in seconds), 503 when the mail fails.", Tag: "users", Session: true},
 		"GET /api/account/export":                          {Summary: "Download own account data", Description: "One JSON file (Content-Disposition attachment corescope-account-<YYYY-MM-DD>.json): {formatVersion: 1, exportedAt, instance, profile, sessions (with kind web|device and the device label), companions (linked companions: pubkey, name, linkedAt), settings, proposals, notifications: {prefs, watches}, audit, mail, observerLogin: {username, createdAt, revoked} or null, observerBindings: [{pubkey, boundAt, boundBy}]}. Every row, no caps. Leaves out the password hash, every session, link and unsubscribe token, and companion link challenges. Audit rows name other accounts by id only. Includes activatedAt, activatedBy (id) and each mail row's to-address. Records a user.export audit row after the file is built.", Tag: "users", Session: true},
 		"GET /api/admin/users":                             {Summary: "List users (admin)", Tag: "users", Session: true, QueryParams: []paramMeta{{Name: "status", Description: "pending | active | disabled", Type: "string"}, {Name: "role", Description: "user | admin", Type: "string"}, {Name: "q", Description: "Substring of email or display name", Type: "string"}, {Name: "bouncing", Description: "1 = only addresses whose mail bounces", Type: "string"}}},
@@ -101,7 +101,7 @@ func routeDescriptions() map[string]routeMeta {
 		"POST /api/admin/users/{id}/mail/{mailId}/refresh": {Summary: "Pull delivery events for one mail from the provider (admin)", Tag: "users", Session: true},
 		"GET /api/admin/audit":                             {Summary: "Global audit log (admin)", Description: "Newest first, keyset-paginated: {entries, next}. Pass next as before for the following page; next is null on the last page. Entry: {id, at, action, actor, target, detail}; actor and target are {id, displayName, email}, {id, deleted: true} for a removed account, or null for the system. Login rows (user.login, user.login.failed) are kept 90 days. 400 on an invalid parameter.", Tag: "users", Session: true, QueryParams: []paramMeta{{Name: "action", Description: "One action, or a group ending in .* (user.login.* matches user.login and user.login.failed)", Type: "string"}, {Name: "user", Description: "User id, as actor or target", Type: "integer"}, {Name: "from", Description: "RFC 3339 time, inclusive", Type: "string"}, {Name: "to", Description: "RFC 3339 time, inclusive", Type: "string"}, {Name: "before", Description: "Only entries with a smaller id (next of the previous page)", Type: "integer"}, {Name: "limit", Description: "Page size, default 100, capped at 500", Type: "integer"}}},
 		"GET /api/admin/stats":                             {Summary: "User figures for the admin overview (admin)", Description: "Accounts by status, active admins, pending accounts older than 24 hours (stuckPending), bouncing addresses, registrations in 7 and 30 days and per UTC day for 30 days (newPerDay, oldest first), users active in 7 and 30 days, logins and failed logins in 24 hours, mail sent in 7 days by latest delivery status (mail7d), and accounts with 5 or more failed logins in 24 hours (guessing: [{userId, displayName, failed}]).", Tag: "users", Session: true},
-		"GET /api/admin/observer-logins":                   {Summary: "List observer MQTT logins and bindings (admin)", Description: "{logins: [{userId, email, displayName, username, createdAt, revoked, lastAuthAt, observers: [pubkey]}], bindings: [{pubkey, userId|null, boundAt, boundBy}]}. Never contains passwords, hashes or ciphertext. Routes exist only when userManagement.observerLogins is enabled.", Tag: "users", Session: true},
+		"GET /api/admin/observer-logins":                   {Summary: "List observer MQTT logins and bindings (admin)", Description: "{logins: [{userId, email, displayName, username, createdAt, revoked, lastAuthAt, observers: [pubkey]}], bindings: [{pubkey, userId|null, boundAt, boundBy, confirmedAt|null}]}. confirmedAt is when the owner's own login first published under the pubkey. Never contains passwords, hashes or ciphertext. Routes exist only when userManagement.observerLogins is enabled.", Tag: "users", Session: true},
 		"POST /api/admin/observer-logins/{id}/revoke":      {Summary: "Revoke a user's observer MQTT login (admin)", Description: "Takes effect at once for the broker hooks. 404 when the user has no login. Records an observer.login.revoke audit row.", Tag: "users", Session: true},
 		"POST /api/admin/observer-logins/{id}/reissue":     {Summary: "Issue new observer MQTT credentials (admin)", Description: "New username and password, revocation cleared, credentials mailed to the account address. 200 {sent: true}; 404 without a login; 503 when the mail fails (the new login is already active). Records an observer.login.reissue audit row without the password.", Tag: "users", Session: true},
 		"PUT /api/admin/observer-bindings/{pubkey}":        {Summary: "Reassign or unbind an observer (admin)", Description: "Body {userId: n} binds the pubkey to that user (bound_by admin, no per-user cap); {userId: null} removes the binding so the next publisher can claim it. Records an observer.binding.set audit row.", Tag: "users", Session: true},
@@ -135,6 +135,8 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "type", Description: "Filter by numeric payload_type value.", Type: "integer"},
 				{Name: "route", Description: "Filter by numeric route_type value.", Type: "integer"},
 				{Name: "observer", Description: "Comma-separated observer IDs; matches transmissions heard by any listed observer. Whitespace around IDs is trimmed.", Type: "string"},
+				{Name: "excludeTx", Description: "Set exactly true to require an observation whose direction is not tx, from one of the selected observer IDs when observer is set, otherwise from any observer. Missing/empty directions remain eligible. Filters transmission membership only; displayed direction and signal values still come from the representative observation. Defaults to false; ignored in multi-node mode.", Type: "boolean"},
+				{Name: "radio", Description: "Only packets some observer heard on this radio setting, \"MHz,kHz,SF,CR\" (e.g. 869.618,62.5,8,8). Resolved from each observer's radio history at the time of the observation (#1869); every observation and packet (grouped rows: their header observation) carries the resolved value as radio. Combined with observer, only those observers' observations count. Served from the in-memory window only: a since/until before it does not fall back to SQL for a radio query.", Type: "string"},
 				{Name: "hash", Description: "Exact transmission hash, with input lowercased before matching. This is not a prefix search.", Type: "string"},
 				{Name: "since", Description: "Lower time bound; RFC3339 recommended. In-memory lists require first_seen > since; SQL uses observations >= since for RFC3339 values, otherwise first_seen > since. Multi-node mode uses first_seen >= since. Omit for no lower bound.", Type: "string"},
 				{Name: "until", Description: "Upper time bound; RFC3339 recommended. In-memory lists require first_seen < until; SQL uses observations <= until for RFC3339 values, otherwise first_seen < until. Multi-node mode uses first_seen <= until. Omit for no upper bound.", Type: "string"},
@@ -160,6 +162,16 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "role", Description: "Filter by node role", Type: "string"},
 				{Name: "status", Description: "Filter by status (active/stale/offline)", Type: "string"},
 			}},
+		"GET /api/nodes/resolve": {
+			Summary: "Resolve a node prefix", Tag: "nodes", Response: schemaRef("NodeResolveResponse"),
+			Description: "Resolves against nodes and eligible client_node_names entries (reported nodes heard directly), counting distinct public keys across both sources. A unique visible match includes pubkey and a non-empty name when available. No match, or a unique blacklisted or hidden-name match, returns only prefix and ambiguous=false. Multiple candidates return ambiguous=true without pubkey/name. Errors use text/plain: 400 (prefix must be hex / prefix must be at least 4 hex chars), 503 (unavailable database), or 500 (query failed).",
+			QueryParams: []paramMeta{{Name: "prefix", Type: "string", Required: true, Description: "Hex prefix or full public key, 4 to 64 characters after trimming whitespace and lowercasing. Odd lengths are accepted. Missing, empty, non-hex, shorter or longer values return 400."}},
+		},
+		"GET /api/nodes/{pubkey}/battery": {
+			Summary: "Get node battery history", Tag: "nodes", Response: schemaRef("NodeBatteryResponse"),
+			Description: "Battery voltage history from observer_metrics for the exact stored pubkey. The node lookup does not normalize case or validate hex; unknown keys return 404. Observer IDs are matched in lowercase or uppercase. Samples with non-null battery_mv in the lookback window are sorted oldest first. With no samples, samples is [], latest_mv and latest_ts are null, and status is unknown. Errors use application/json objects with an error string: 404 (node not found), or 500 for node/history database query failures.",
+			QueryParams: []paramMeta{{Name: "days", Type: "integer", Description: "Lookback in whole days, 1 through 365. Defaults to 7 when omitted, invalid, non-positive or above 365; values are not clamped."}},
+		},
 		"GET /api/nodes/search":             {Summary: "Search nodes", Description: "Search nodes by name or public key prefix.", Tag: "nodes", QueryParams: []paramMeta{{Name: "q", Description: "Search query", Type: "string", Required: true}}},
 		"GET /api/nodes/reported":           {Summary: "Repeaters known only from their reported name", Description: "Repeaters that told a mobile companion their own name (client_node_names, ANON_REQ_TYPE_OWNER) have no row in nodes or inactive_nodes, and were heard directly at least once (a discover or advert reception). 404 when clientRxCoverage is disabled. Each carries its reception counts and, when companions heard it directly from at least `method.min_spots` spots at least `method.min_spread_m` apart, an `estimate`: a SNR-weighted centroid of those spots with `radius_m` (never below `method.min_radius_m`). The estimate is where companions stood, weighted, not a measured position. Cached for 5 minutes.", Tag: "nodes"},
 		"GET /api/nodes/bulk-health":        {Summary: "Bulk node health", Description: "Returns health status for all nodes in one call.", Tag: "nodes"},
@@ -183,6 +195,8 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "bbox", Description: "Bounding box as minLat,minLon,maxLat,maxLon", Type: "string", Required: true},
 				{Name: "z", Description: "Leaflet zoom level; sets the hex resolution", Type: "integer"},
 				{Name: "days", Description: "Look-back window in days (1-30, default 7)", Type: "integer"},
+				{Name: "rx", Description: "Only this companion's samples", Type: "string"},
+				{Name: "mine", Description: "1 = only samples of companions linked to the logged-in user (browser session; 401 without one)", Type: "string"},
 			}},
 		"GET /api/rx-coverage": {Summary: "Mobile RX coverage hex grid", Description: "GeoJSON hex cells where mobile clients directly heard nodes (client_receptions): count, best SNR and the nodes heard per cell. With gaps=1 the payload also carries a `gaps` member: cells a companion drove through (moving client_rf_samples) with no reception in the same window, each with its sample count, plus `gaps_truncated` when capped. Gaps are only returned without a node filter and with clientRfSamples on; they mean nothing was received in this period, not that there is no coverage. Gated on clientRxCoverage.", Tag: "coverage",
 			QueryParams: []paramMeta{
@@ -226,9 +240,10 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/channels/{hash}/messages": {Summary: "Get channel messages", Description: "Returns messages for a specific channel.", Tag: "channels"},
 
 		// Observers
-		"GET /api/observers":                 {Summary: "List observers", Description: "Returns all known packet observers/gateways.", Tag: "observers"},
+		"GET /api/observers":                 {Summary: "List observers", Description: "Returns all known packet observers/gateways. neighbors_report_at (when the latest /neighbors report arrived) and neighbors_count (how many neighbors it named) are present for observers that ever sent one (#2270).", Tag: "observers"},
 		"GET /api/observers/clock-skew":      {Summary: "Observer clock calibrations", Description: "Returns an array of observer clock calibrations: observerID, offsetSec (seconds; positive means the observer clock is ahead) and samples (number of multi-observer packet samples used). Returns an empty array when the store or calibration data is unavailable.", Tag: "observers", Response: schemaRef("ObserverClockSkewResponse")},
-		"GET /api/observers/{id}":            {Summary: "Get observer detail", Tag: "observers"},
+		"GET /api/observers/{id}":            {Summary: "Get observer detail", Description: "radio_history lists every radio setting the observer reported, oldest first: {radio_id, radio, first_seen, last_seen}. radio_id is empty for the main radio and the node's own id for an entry of a multi-radio status radios map (#1869). neighbor_report is the latest /neighbors report (#2271): {received_at, reported_at, neighbor_count, queried_neighbors, self_scopes, self_default_scope, neighbors: [{pubkey, name, role, snr, heard_secs_ago, status, scopes}]}; name and role come from the node table when known. Absent when the observer never sent one.", Tag: "observers"},
+		"GET /api/radios":                    {Summary: "Radio settings heard on", Description: "Every radio setting (canonical \"MHz,kHz,SF,CR\") some observer has listened on, with those observers and the span of time, for the radio filter of /api/packets (#1869).", Tag: "observers"},
 		"GET /api/observers/{id}/metrics":    {Summary: "Get observer metrics", Description: "Packet rates, uptime, and performance metrics.", Tag: "observers"},
 		"GET /api/observers/{id}/analytics":  {Summary: "Get observer analytics", Tag: "observers"},
 		"GET /api/observers/metrics/summary": {Summary: "Observer metrics summary", Description: "Aggregate metrics across all observers within window (noise floor, battery, sparkline). Each row also carries tx_airtime_pct_1h / rx_airtime_pct_1h: the airtime share over the last hour regardless of window, null with under 30 minutes of samples since the last reboot or no sample in the last 15 minutes. duty_cycle_warn_pct is the configured warning threshold (dutyCycleWarnPct, default 10).", Tag: "observers", QueryParams: []paramMeta{{Name: "window", Description: "Lookback such as 1h, 24h, 7d (default 24h)", Type: "string"}, {Name: "region", Description: "IATA code to filter observers", Type: "string"}}},
@@ -247,6 +262,7 @@ func routeDescriptions() map[string]routeMeta {
 type openAPISchema struct {
 	Type        string                   `json:"type"`
 	Description string                   `json:"description,omitempty"`
+	Nullable    bool                     `json:"nullable,omitempty"`
 	Enum        []string                 `json:"enum,omitempty"`
 	Items       *openAPISchema           `json:"items,omitempty"`
 	Properties  map[string]openAPISchema `json:"properties,omitempty"`
@@ -280,6 +296,36 @@ func componentSchemas() map[string]interface{} {
 		return m
 	}
 	return map[string]interface{}{
+		"NodeResolveResponse": openAPISchema{
+			Type: "object", Required: []string{"prefix", "ambiguous"},
+			Properties: map[string]openAPISchema{
+				"prefix":    {Type: "string", Description: "Trimmed, lowercase query prefix."},
+				"pubkey":    {Type: "string", Description: "Present only for a unique visible match."},
+				"name":      {Type: "string", Description: "Present only when a unique visible match has a non-empty name."},
+				"ambiguous": {Type: "boolean", Description: "True when multiple distinct public keys match; pubkey and name are then omitted."},
+			},
+		},
+		"NodeBatteryResponse": openAPISchema{
+			Type: "object", Required: []string{"public_key", "days", "samples", "latest_mv", "latest_ts", "status", "thresholds"},
+			Properties: map[string]openAPISchema{
+				"public_key": {Type: "string", Description: "The requested public key, lowercased in the response."},
+				"days":       {Type: "integer", Description: "Effective lookback window in days."},
+				"samples": {Type: "array", Description: "Battery samples in timestamp order, oldest first; empty array when none are available.", Items: &openAPISchema{
+					Type: "object", Required: []string{"timestamp", "battery_mv"},
+					Properties: map[string]openAPISchema{
+						"timestamp":  {Type: "string", Description: "Stored sample timestamp."},
+						"battery_mv": {Type: "integer", Description: "Battery voltage in millivolts."},
+					},
+				}},
+				"latest_mv": {Type: "integer", Nullable: true, Description: "Newest sample voltage in millivolts, or null when the window is empty."},
+				"latest_ts": {Type: "string", Nullable: true, Description: "Newest sample timestamp, or null when the window is empty."},
+				"status":    {Type: "string", Enum: []string{"critical", "low", "ok", "unknown"}, Description: "critical below critical_mv; otherwise low below low_mv; otherwise ok. unknown when the window has no samples."},
+				"thresholds": {Type: "object", Required: []string{"low_mv", "critical_mv"}, Properties: map[string]openAPISchema{
+					"low_mv":      {Type: "integer", Description: "Configured low-battery threshold in millivolts; default 3300."},
+					"critical_mv": {Type: "integer", Description: "Configured critical-battery threshold in millivolts; default 3000."},
+				}},
+			},
+		},
 		"FleetClockSkewResponse": openAPISchema{
 			Type: "array", Items: &openAPISchema{Type: "object"},
 		},
@@ -308,11 +354,12 @@ func componentSchemas() map[string]interface{} {
 				"flood_advert_count_7d":    map[string]interface{}{"type": "integer", "description": "Distinct FLOOD adverts originated in the last 7 days (zero-hop adverts excluded). Present on the node detail endpoint."},
 				"battery_mv":               map[string]interface{}{"type": "integer", "nullable": true},
 				"temperature_c":            map[string]interface{}{"type": "number", "nullable": true},
-				"relay_active":             map[string]interface{}{"type": "boolean", "description": "Repeater/room only: relayed traffic within the active window."},
+				"relay_active":             map[string]interface{}{"type": "boolean", "description": "Repeater/room only: attributed non-advert relay-hop appearance within the active window; may include shared prefixes. Unchanged legacy field, not certain liveness evidence."},
 				"relay_count_1h":           map[string]interface{}{"type": "integer", "description": "Repeater/room only: relay-hop appearances in the last hour."},
 				"relay_count_24h":          map[string]interface{}{"type": "integer", "description": "Repeater/room only: relay-hop appearances in the last 24 hours."},
 				"unscoped_relay_count_24h": map[string]interface{}{"type": "integer", "description": "Repeater/room only: subset of relay_count_24h that were unscoped floods (route_type FLOOD). A well-configured repeater sets flood.max.unscoped 0, so a non-trivial count flags a base-config problem."},
 				"last_relayed":             str("Repeater/room only: RFC3339 time this node last appeared as a relay hop."),
+				"last_certain_relay":       str("Repeater/room only: UTC RFC3339 timestamp of the newest valid transmission first_seen accepted as a certain relay. Requires a matching hop in that observation's eligible FLOOD/TRANSPORT_FLOOD frame, a unique prefix at that width and no retired namesake; excludes direct/TRACE paths and failed advert signatures. An originated advert alone does not count; forwarding another node's advert can count even when non-advert relay counts are zero. Uses first_seen, not a late observation's timestamp; uniqueness is checked when evidence is ingested. State is omitted when absent and cleared when the node's packet-store membership is evicted. Does not change relay_active or attributed relay counts."),
 				"declared_regions":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Repeater/room only (#1862): named regions from this node's newest declared-regions answer, spelled as GET /api/scope-audit declaredRegions spells them (leading '#' stripped, '*' wildcard excluded). Empty array: it answered and named no region. Absent: it never answered, this database has no declared-regions source, or the declared-regions lookup failed. Absence is not evidence the node lacks a region."},
 				"region_placement":         schemaRef("NodeRegionPlacement"),
 				"relay_window_hours":       map[string]interface{}{"type": "integer", "description": "Repeater/room only, /api/nodes/{pubkey} detail endpoint only: width (hours) of the relay-activity window the relay_count_* values cover."},
