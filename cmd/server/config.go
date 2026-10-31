@@ -63,6 +63,12 @@ type Config struct {
 	// the fewest-hops rule places in only one region. See region_nodes_durable.go.
 	RegionPins map[string][]string `json:"regionPins"`
 
+	// RegionHopCaps (MeshTexas) overrides the durable region
+	// snapshot's fallback hop cap (fallbackMaxHops) for specific regions, e.g.
+	// {"ELP": 5} for a region with no neighbouring region to leak into. Keys
+	// are IATA codes. See region_nodes_durable.go.
+	RegionHopCaps map[string]int `json:"regionFallbackMaxHops,omitempty"`
+
 	// hiddenPrefixesPtr holds the active prefix slice as an atomic pointer.
 	// Read path (IsNameHidden) is a single atomic load — no mutex, no
 	// sync.Once. Writers always replace the whole slice; readers see either

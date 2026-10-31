@@ -34,7 +34,7 @@ func TestBuildRegionMembership(t *testing.T) {
 		{pubkey: "gulf", iata: "AUS", total: 6, direct: 0, minHops: fallbackMaxHops + 1},
 		{pubkey: "gulf", iata: "HOU", total: 2, direct: 0, minHops: 7},
 	}
-	members, direct, unplaced := buildRegionMembership(rows)
+	members, direct, unplaced := buildRegionMembership(rows, nil)
 
 	want := map[string]map[string]bool{
 		"aus":      {"AUS": true},
@@ -77,7 +77,7 @@ func TestRegionSnapshotMembers(t *testing.T) {
 		{pubkey: "aus", iata: "SAT", total: 4, direct: 0, minHops: 2},
 		{pubkey: "sat", iata: "SAT", total: 2, direct: 2},
 		{pubkey: "gulf", iata: "SAT", total: 3, direct: 0, minHops: 9},
-	})
+	}, nil)
 	regionAdvertSnapMu.Lock()
 	regionAdvertSnap = &regionSnapshot{members: members}
 	regionAdvertSnapMu.Unlock()
@@ -96,7 +96,7 @@ func TestApplyRegionPins(t *testing.T) {
 	members, _, _ := buildRegionMembership([]regionHearing{
 		{pubkey: "blanco", iata: "AUS", total: 9, direct: 0, minHops: 2},
 		{pubkey: "blanco", iata: "SAT", total: 3, direct: 0, minHops: 3},
-	})
+	}, nil)
 	applyRegionPins(members, map[string][]string{
 		" BLANCO ": {"sat"},
 		"quiet":    {"SAT", " "},
@@ -154,5 +154,35 @@ func TestRegionAdvertHearingsMinHops(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("hearings = %+v, want %+v", got, want)
+	}
+}
+
+func TestBuildRegionMembershipRegionHopCaps(t *testing.T) {
+	caps := normalizeRegionHopCaps(map[string]int{" elp ": 5, "SAT": -1, "": 9})
+	if want := map[string]int{"ELP": 5}; !reflect.DeepEqual(caps, want) {
+		t.Fatalf("caps = %v, want %v", caps, want)
+	}
+	members, _, unplaced := buildRegionMembership([]regionHearing{
+		// Beyond the default cap but within ELP's: placed in ELP.
+		{pubkey: "cruces", iata: "ELP", total: 3, direct: 0, minHops: 5},
+		// Beyond ELP's cap too: no region.
+		{pubkey: "far", iata: "ELP", total: 1, direct: 0, minHops: 6},
+		// Other regions keep the default cap.
+		{pubkey: "gulf", iata: "AUS", total: 6, direct: 0, minHops: fallbackMaxHops + 1},
+		// Tied at 4 hops: ELP's cap admits it, AUS's does not.
+		{pubkey: "tie", iata: "ELP", total: 1, direct: 0, minHops: 4},
+		{pubkey: "tie", iata: "AUS", total: 1, direct: 0, minHops: 4},
+	}, caps)
+	want := map[string]map[string]bool{
+		"cruces": {"ELP": true},
+		"far":    {},
+		"gulf":   {},
+		"tie":    {"ELP": true},
+	}
+	if !reflect.DeepEqual(members, want) {
+		t.Fatalf("members = %v, want %v", members, want)
+	}
+	if unplaced != 2 {
+		t.Fatalf("in no region = %d, want 2", unplaced)
 	}
 }

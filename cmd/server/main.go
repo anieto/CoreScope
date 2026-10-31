@@ -211,7 +211,7 @@ func main() {
 	// In-memory packet store
 	store := NewPacketStore(database, cfg.PacketStore, cfg.CacheTTL)
 	store.config = cfg
-	startRegionAdvertSnapshot(database, cfg.NodeDaysOrDefault(), cfg.RegionPins) // MeshTexas: see region_nodes_durable.go
+	startRegionAdvertSnapshot(database, cfg.NodeDaysOrDefault(), cfg.RegionPins, cfg.RegionHopCaps) // MeshTexas: see region_nodes_durable.go
 
 	// Load the persisted neighbor graph BEFORE the packet load so the
 	// chunked loader can resolve relay-hop pubkeys from path_json. Since

@@ -25,7 +25,8 @@ import (
 //     doesn't pin it somewhere it isn't);
 //   - never heard directly: the regions that heard it in the fewest hops, or
 //     none when even its closest hearing is more than fallbackMaxHops away (it
-//     still shows under All). Every region that heard it at all, the old rule,
+//     still shows under All). Config regionFallbackMaxHops overrides the cap
+//     per region, for regions with no neighbour to leak into. Every region that heard it at all, the old rule,
 //     leaked most of the mesh into every region: adverts flood statewide, so
 //     DFW and AUS observers both hear nodes on the Gulf Coast 10 hops out.
 // Config regionPins then add hand-picked regions to specific nodes.
@@ -57,7 +58,8 @@ var (
 
 // startRegionAdvertSnapshot refreshes the snapshot now and then every
 // regionAdvertSnapshotInterval, for the life of the process.
-func startRegionAdvertSnapshot(db *DB, nodeDays int, pins map[string][]string) {
+func startRegionAdvertSnapshot(db *DB, nodeDays int, pins map[string][]string, maxHops map[string]int) {
+	hopCaps := normalizeRegionHopCaps(maxHops)
 	go func() {
 		for {
 			t0 := time.Now()
@@ -65,7 +67,7 @@ func startRegionAdvertSnapshot(db *DB, nodeDays int, pins map[string][]string) {
 			if err != nil {
 				log.Printf("[region] advert snapshot failed: %v", err)
 			} else {
-				members, direct, unplaced := buildRegionMembership(rows)
+				members, direct, unplaced := buildRegionMembership(rows, hopCaps)
 				applyRegionPins(members, pins)
 				regionAdvertSnapMu.Lock()
 				regionAdvertSnap = &regionSnapshot{members: members}
@@ -79,10 +81,11 @@ func startRegionAdvertSnapshot(db *DB, nodeDays int, pins map[string][]string) {
 }
 
 // buildRegionMembership applies the membership rule above to snapshot rows.
-// It returns pubkey -> region set (empty for a node in no region, which keeps
+// hopCaps holds per-region fallback caps (upper-case IATA); other regions use
+// fallbackMaxHops. It returns pubkey -> region set (empty for a node in no region, which keeps
 // the in-memory scan from re-adding it), how many nodes were placed by direct
 // hearings, and how many ended up in no region.
-func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, int, int) {
+func buildRegionMembership(rows []regionHearing, hopCaps map[string]int) (map[string]map[string]bool, int, int) {
 	type node struct {
 		hops        map[string]int
 		direct      map[string]int
@@ -119,11 +122,9 @@ func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, in
 					fewest = h
 				}
 			}
-			if fewest <= fallbackMaxHops {
-				for iata, h := range n.hops {
-					if h == fewest {
-						set[iata] = true
-					}
+			for iata, h := range n.hops {
+				if h == fewest && h <= regionHopCap(hopCaps, iata) {
+					set[iata] = true
 				}
 			}
 		}
@@ -133,6 +134,26 @@ func buildRegionMembership(rows []regionHearing) (map[string]map[string]bool, in
 		members[pk] = set
 	}
 	return members, placedByDirect, unplaced
+}
+
+// normalizeRegionHopCaps upper-cases the configured per-region caps and drops
+// blank codes and negative caps.
+func normalizeRegionHopCaps(caps map[string]int) map[string]int {
+	out := make(map[string]int, len(caps))
+	for code, n := range caps {
+		if code = strings.TrimSpace(strings.ToUpper(code)); code != "" && n >= 0 {
+			out[code] = n
+		}
+	}
+	return out
+}
+
+// regionHopCap is the fallback hop cap for one region.
+func regionHopCap(hopCaps map[string]int, iata string) int {
+	if n, ok := hopCaps[iata]; ok {
+		return n
+	}
+	return fallbackMaxHops
 }
 
 // applyRegionPins adds each pinned node's configured regions to its computed
