@@ -99,9 +99,9 @@
       return Promise.resolve(cached);
     }
     return Promise.all([
-      fetch('/api/nodes/' + pk).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch('/api/nodes/' + pk + '/analytics?window=24h').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch('/api/nodes/' + pk + '/paths?limit=20').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      CSApi.fetch('/api/nodes/' + pk).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      CSApi.fetch('/api/nodes/' + pk + '/analytics?window=24h').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      CSApi.fetch('/api/nodes/' + pk + '/paths?limit=20').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ]).then(function (out) {
       var result = { detail: out[0], analytics: out[1], paths: out[2] };
       // Evict oldest entry (Map preserves insertion order) before adding.
@@ -332,12 +332,10 @@
     });
 
     var totalKm = dists.filter(function(d){return d!=null}).reduce(function(a,b){return a+b},0);
-    // Two genuinely different cases, already distinguished per-row (below,
-    // "no GPS" vs "unknown" status chips) but previously conflated into one
-    // "N unresolved" header count — misleading for a gpsless hop, since we
-    // know exactly which node it is, just not its coordinates.
+    // A gpsless hop is fully identified (name/role known), just missing
+    // coordinates, so it is counted apart from a genuinely unresolved hop.
     var gpslessCount = positions.filter(function(p){return p.resolved===false && p.gpsless}).length;
-    var unknownCount = positions.filter(function(p){return p.resolved===false && !p.gpsless}).length;
+    var unresolvedCount = positions.filter(function(p){return p.resolved===false && !p.gpsless}).length;
     var multiPath = (opts && opts.multiPath) === true;
     var totalObservers = (opts && opts.totalObservers) || 1;
     var packetHash = (opts && opts.packetHash) || null;
@@ -357,19 +355,15 @@
       opts.allPaths.forEach(function (p) { seen[pathGroupKey(p.path, filterHops)] = true; });
       return Object.keys(seen).length;
     })() : 1;
-    var multiPathChip = '';
-    var pathPicker = '';
-    // Entry hint for the picker: the click-to-isolate rows had no indication
-    // they were interactive besides a subtle hover tint, so every multi-path
-    // route gets a brief pulse (CSS, see mc-rt-paths-pulse) — it's subtle
-    // enough to not bother a returning viewer, and keeps working as a cue
-    // for anyone new. The one-time toast (render(), below, after this
-    // sidebar is inserted) is a bigger interruption than a soft glow, so
-    // that part stays gated to a viewer's very first encounter only.
-    var showPathHint = multiPath;
+    // Discoverability: every multi-path route pulses the picker briefly (CSS);
+    // the one-time toast fires only on a viewer's first encounter.
     var showPathToastHint = false;
     if (multiPath) {
       try { showPathToastHint = !localStorage.getItem('mc-rt-path-hint-seen'); } catch (e) {}
+    }
+    var multiPathChip = '';
+    var pathPicker = '';
+    if (multiPath) {
       multiPathChip = '<div class="mc-rt-multipath-chip">' +
         '<div><b>' + totalObservers + '</b> observers · <b>' + uniquePathsCount + '</b> unique paths</div>' +
         '<div class="mc-rt-multipath-key">thicker edge = more observers saw it</div>' +
@@ -421,7 +415,7 @@
           '<span class="mc-rt-path-obs" title="' + escapeHtml(g.observers.join(', ')) + '">' + escapeHtml(sample) + moreSuffix + '</span>' +
         '</li>';
       }).join('');
-      pathPicker = '<details class="mc-rt-paths' + (showPathHint ? ' mc-rt-paths-pulse' : '') + '" open><summary class="mc-rt-paths-header">' +
+      pathPicker = '<details class="mc-rt-paths' + (multiPath ? ' mc-rt-paths-pulse' : '') + '" open><summary class="mc-rt-paths-header">' +
         '<svg class="ph-icon mc-rt-paths-chevron" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-caret-down"/></svg>' +
         uniquePathsCount + ' unique paths · click to isolate' +
         '<button type="button" class="mc-rt-path-clear" aria-label="Show all paths">All</button>' +
@@ -456,7 +450,7 @@
         '</div>' +
         '<div class="mc-rt-meta">' + hopCount + ' hops · ' + totalKm + ' km' +
           (gpslessCount ? ' · ' + gpslessCount + ' no GPS' : '') +
-          (unknownCount ? ' · ' + unknownCount + ' unresolved' : '') +
+          (unresolvedCount ? ' · ' + unresolvedCount + ' unresolved' : '') +
         '</div>' +
         contextBlock +
         multiPathChip +
@@ -856,6 +850,8 @@
         if (pinnedTop) pinnedTop.innerHTML = rowFor(iso[0], 0);
         if (pinnedBottom) pinnedBottom.innerHTML = iso.length > 1 ? rowFor(iso[iso.length - 1], iso.length - 1) : '';
         listEl.innerHTML = iso.slice(1, -1).map(function (p, k) { return rowFor(p, k + 1); }).join('');
+        // Line of sight per leg of the isolated path (rows are iso, in order).
+        if (window.MeshRouteLOS) window.MeshRouteLOS.update({ map: mapRef, sidebar: sidebar, seq: iso });
       }
     }
     function restoreAllPaths() {
@@ -890,6 +886,7 @@
         // future row-listener type being added to the initial path and
         // forgotten here.
         newRowEls.forEach(sidebar._wireRow || function () {});
+        if (window.MeshRouteLOS) window.MeshRouteLOS.update({ map: mapRef, sidebar: sidebar, seq: positions });
       }
 
       // Union-of-edges (NOT per-path). Iterate edgeCounts once;
@@ -1035,6 +1032,37 @@
         restoreAllPaths();
       });
     }
+    // On-map "N hops shown" badge: the sidebar chip says the same, but someone
+    // looking only at the map would read a short default path as the whole
+    // route. One button; tapping it shows every path and removes the badge.
+    if (mapRef && typeof mapRef.getContainer === 'function') {
+      var mapContainerEl = mapRef.getContainer();
+      // Always clear a stale badge from a prior route, even for a single-path one.
+      var priorMapBadge = mapContainerEl.querySelector('.mc-rt-map-badge');
+      if (priorMapBadge) priorMapBadge.remove();
+      if (multiPath) {
+        var mapBadge = document.createElement('button');
+        mapBadge.type = 'button';
+        mapBadge.className = 'mc-rt-map-badge';
+        mapBadge.innerHTML =
+          '<div class="mc-rt-map-badge-line1">' +
+            '<span class="mc-rt-map-badge-count"><b>' + hopCount + '</b> hop' + (hopCount === 1 ? '' : 's') + ' shown</span> · ' +
+            totalObservers + ' observers saw ' + uniquePathsCount + ' path' + (uniquePathsCount === 1 ? '' : 's') + ' ' +
+            '<span class="mc-rt-map-badge-cta">tap to see all</span>' +
+          '</div>' +
+          '<div class="mc-rt-map-badge-line2">or select a path in the sidebar</div>';
+        mapBadge.setAttribute('aria-label',
+          'Showing ' + hopCount + ' hop' + (hopCount === 1 ? '' : 's') + ' of ' + uniquePathsCount +
+          ' observed path' + (uniquePathsCount === 1 ? '' : 's') + '. Tap to show all paths, ' +
+          'or select a specific one from the sidebar list.');
+        mapBadge.addEventListener('click', function () {
+          pathRows.forEach(function (r) { r.classList.remove('mc-rt-path-active'); });
+          restoreAllPaths();
+          mapBadge.remove();
+        });
+        mapContainerEl.appendChild(mapBadge);
+      }
+    }
     // Deep-link initial view (?paths=all / ?observer=, see map.js
     // loadRouteFromDeepLink): the same handlers as the operator's click.
     sidebar._applyPathView = function (view) {
@@ -1048,54 +1076,6 @@
         }
       }
     };
-
-    // On-map "N hops shown of M" badge: the sidebar's own observer/path chip
-    // says the same thing, but nobody looking only at the map (not scrolling
-    // or reading the sidebar) ever sees it — a short default path can read
-    // as "that's the whole route" otherwise. Lives on the map canvas itself,
-    // and tapping it jumps straight to the same restoreAllPaths() the
-    // sidebar's own "All" button uses, then removes itself (its own promise
-    // is fulfilled once every path is shown).
-    if (mapRef && typeof mapRef.getContainer === 'function') {
-      var mapContainerEl = mapRef.getContainer();
-      // Always clear a stale badge from a prior route, even one that isn't
-      // multi-path itself — otherwise a badge from an earlier multi-path
-      // route lingers into a later single-path one it no longer describes.
-      var priorMapBadge = mapContainerEl.querySelector('.mc-rt-map-badge');
-      if (priorMapBadge) priorMapBadge.remove();
-    }
-    if (multiPath && mapRef && typeof mapRef.getContainer === 'function') {
-      var mapBadge = document.createElement('button');
-      mapBadge.type = 'button';
-      mapBadge.className = 'mc-rt-map-badge';
-      // Two lines: the whole pill is still one button (tapping anywhere
-      // calls restoreAllPaths), so the second line is plain informational
-      // text about the OTHER way to explore — not a separate tap target of
-      // its own, which is why it isn't styled like the "tap to see all" cta.
-      // Wrapping "N hops shown" and "tap to see all" each in their own
-      // nowrap span keeps the bold count glued to its own word instead of
-      // orphaning onto its own line when the flex row runs out of room on
-      // a narrow screen — plain text flow between the spans still wraps
-      // normally at whichever word boundary actually needs it.
-      mapBadge.innerHTML =
-        '<div class="mc-rt-map-badge-line1">' +
-          '<span class="mc-rt-map-badge-count"><b>' + hopCount + '</b> hop' + (hopCount === 1 ? '' : 's') + ' shown</span> · ' +
-          totalObservers + ' observers saw ' + uniquePathsCount + ' path' + (uniquePathsCount === 1 ? '' : 's') + ' ' +
-          '<span class="mc-rt-map-badge-cta">tap to see all</span>' +
-        '</div>' +
-        '<div class="mc-rt-map-badge-line2">or select a path in the sidebar</div>';
-      mapBadge.setAttribute(
-        'aria-label',
-        'Showing ' + total + ' of ' + uniquePathsCount + ' observed paths. Tap to show all paths, ' +
-          'or select a specific one from the sidebar list.'
-      );
-      mapBadge.addEventListener('click', function () {
-        pathRows.forEach(function (r) { r.classList.remove('mc-rt-path-active'); });
-        restoreAllPaths();
-        mapBadge.remove();
-      });
-      mapContainerEl.appendChild(mapBadge);
-    }
 
     // Sparkline interactivity
     var sparkDots = sidebar.querySelectorAll('.mc-rt-spark-dot');
@@ -1146,11 +1126,9 @@
       });
     }
 
-    // buildSidebar only returns the DOM node, not a data object — stash the
-    // toast decision (separate from the always-on pulse, see showPathHint
-    // above) here so render() can read it back after inserting this element.
+    // buildSidebar only returns the DOM node; render() reads this back to
+    // decide on the one-time toast.
     if (showPathToastHint) sidebar.dataset.showPathToastHint = '1';
-
     return sidebar;
   }
 
@@ -1192,6 +1170,7 @@
       if (!stillRoute) {
         if (layer && layer.clearLayers) layer.clearLayers();
         document.querySelectorAll('.mc-rt-sidebar').forEach(function (el) { el.remove(); });
+        document.querySelectorAll('.mc-rt-map-badge').forEach(function (el) { el.remove(); });
         document.body.classList.remove('mc-route-active');
         try { sessionStorage.removeItem('map-route-hops'); } catch (e) {}
         window.removeEventListener('hashchange', teardownIfNavigatedAway);
@@ -1212,6 +1191,7 @@
         // Polish review (carmack): clear the unbounded _detailCache (it grew
         // for the lifetime of the tab; bounded now to per-route session).
         try { if (typeof _detailCache !== 'undefined') _detailCache.clear && _detailCache.clear(); } catch (e) {}
+        if (window.MeshRouteLOS) window.MeshRouteLOS.clear();
         // Leaflet cached its container width while sidebar was open; force a
         // re-measure so markers/tiles re-render at full width.
         if (mapRef && typeof mapRef.invalidateSize === 'function') {
@@ -1497,23 +1477,17 @@
       document.body.appendChild(sidebar);
     }
 
-    // The pulse itself (buildSidebar, above) now runs on every multi-path
-    // route — subtle enough not to bother a returning viewer. This toast is
-    // a bigger interruption, so it stays gated to a viewer's very first
-    // encounter (sidebar.dataset.showPathToastHint, set in buildSidebar).
+    // One-time tip (first multi-path route only; buildSidebar sets the flag).
+    // Styled by .mc-rt-path-toast so it follows the theme.
     if (sidebar.dataset.showPathToastHint === '1') {
       try {
         var hintToast = document.createElement('div');
+        hintToast.className = 'mc-rt-path-toast';
         hintToast.setAttribute('role', 'status');
         hintToast.setAttribute('aria-live', 'polite');
-        hintToast.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);' +
-          'background:var(--mc-bg-secondary,#1a1a1a);color:var(--mc-text-primary,#e5e5e5);' +
-          'padding:10px 16px;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.4);' +
-          'z-index:10000;font:13px/1.4 system-ui,sans-serif;max-width:80vw;text-align:center;';
-        // No directional word ("below"/"left"): the sidebar is a left panel
-        // on desktop but a bottom sheet on mobile, and this toast floats
-        // over the map either way, not adjacent to the list itself.
-        hintToast.textContent = '💡 Tip: click any path in the list to see it on the map';
+        // No directional word: the sidebar is a left panel on desktop but a
+        // bottom sheet on mobile.
+        hintToast.textContent = 'Tip: click any path in the list to see it on the map';
         document.body.appendChild(hintToast);
         setTimeout(function () { try { hintToast.remove(); } catch (e) {} }, 6000);
         localStorage.setItem('mc-rt-path-hint-seen', '1');
@@ -1639,6 +1613,8 @@
     if (opts.initialPathView && sidebar._applyPathView) {
       requestAnimationFrame(function () { sidebar._applyPathView(opts.initialPathView); });
     }
+    // Line of sight per leg: chips on the rows, obstruction markers, profile panel.
+    if (window.MeshRouteLOS) window.MeshRouteLOS.update({ map: mapRef, sidebar: sidebar, seq: positions });
   }
 
   window.MeshRouteView = { render: render };

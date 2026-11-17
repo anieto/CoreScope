@@ -103,10 +103,8 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   font-family: system-ui, sans-serif;
 }
 
-/* On-map "N hops shown of M" badge (route-view.js buildSidebar) — lives on
-   the map canvas itself, not the sidebar, so it's visible to someone who
-   never scrolls or reads the sidebar at all. Bottom-center: top of the map
-   already has zoom controls (left) and a settings gear (right). */
+/* On-map "N hops shown" badge (route-view.js buildSidebar). Bottom-center:
+   the top of the map already holds the zoom controls and settings gear. */
 .mc-rt-map-badge {
   position: absolute;
   bottom: 16px;
@@ -118,50 +116,64 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   align-items: center;
   gap: 2px;
   padding: 8px 14px;
-  /* --surface-2/--border/--text — the same theme-aware trio .mc-rt-paths
-     already uses successfully. The toast blocks elsewhere in this codebase
-     use --mc-bg-secondary/--mc-text-primary, but those aren't real defined
-     variables (confirmed via getComputedStyle: empty string), so toasts
-     were silently always rendering their hardcoded dark fallback regardless
-     of theme — harmless for a toast that's gone in seconds, but this badge
-     is long-lived, and in light mode it rendered dark-background-dark-text,
-     completely illegible. Don't copy that pattern here. */
   background: var(--surface-2, #232323);
   color: var(--text, #cbd5e1);
   border: 1px solid var(--border, #333);
-  /* Two lines reads better with a moderate radius than a full stadium pill
-     (999px), which looks stretched/odd once the box is taller than it is
-     thin. */
   border-radius: 16px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  box-shadow: 0 4px 16px var(--shadow);
   font: 12px/1.3 system-ui, sans-serif;
   cursor: pointer;
   max-width: 90vw;
 }
-/* Plain text flow, not flex: a flex row with no flex-wrap forces each of
-   its 3 children (the count span, the loose "N observers..." text, the cta
-   span) to squeeze into whatever width is left on a narrow screen, which
-   made the count span wrap internally and land on its own line, ahead of
-   the text it belongs with. Normal inline flow just wraps at whichever
-   word boundary actually needs it, and the nowrap spans below (count, cta)
-   keep their own few words glued together regardless of where that is. */
+/* Plain inline flow so the count and cta spans stay glued to their words and
+   wrap only at real word boundaries on a narrow screen. */
 .mc-rt-map-badge-line1 { text-align: center; }
 .mc-rt-map-badge-count { white-space: nowrap; }
 .mc-rt-map-badge-line2 { font-size: 10px; color: var(--text-muted, #94a3b8); }
 .mc-rt-map-badge:hover { background: var(--bg-hover, rgba(120,160,255,0.16)); }
+.mc-rt-map-badge:focus-visible { outline: 2px solid var(--accent, #06b6d4); outline-offset: 2px; }
+.mc-rt-map-badge-cta {
+  color: var(--accent, #06b6d4);
+  font-weight: 600;
+  white-space: nowrap;
+}
 @media (max-width: 767px) {
-  /* A bit more clearance above the mobile bottom-sheet summary bar, and a
-     tighter max-width so the pill doesn't crowd the screen edges. */
   .mc-rt-map-badge {
     bottom: 24px;
     max-width: calc(100vw - 24px);
     font-size: 11px;
   }
 }
-.mc-rt-map-badge-cta {
-  color: var(--accent, #06b6d4);
-  font-weight: 600;
-  white-space: nowrap;
+
+/* One-time tip toast (route-view.js render). Themed via variables. */
+.mc-rt-path-toast {
+  position: fixed;
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  max-width: 80vw;
+  padding: 10px 16px;
+  background: var(--surface-2, #232323);
+  color: var(--text, #cbd5e1);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--shadow);
+  font: 13px/1.4 system-ui, sans-serif;
+  text-align: center;
+}
+
+/* Brief, finite outline pulse on every multi-path picker. `outline`, not
+   box-shadow: the picker has overflow hidden/auto, which clips box-shadow. */
+@keyframes mc-rt-paths-pulse-kf {
+  0%, 100% { outline: 2px solid transparent; outline-offset: 0; }
+  50% { outline: 2px solid var(--accent, #06b6d4); outline-offset: 2px; }
+}
+.mc-rt-paths-pulse {
+  animation: mc-rt-paths-pulse-kf 1.4s ease-in-out 4;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mc-rt-paths-pulse { animation: none; }
 }
 
 /* Multi-path picker — Click a path to isolate it on the map. */
@@ -175,26 +187,6 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   overflow: hidden;
 }
 .mc-rt-paths[open] { overflow: auto; max-height: 180px; }
-/* One-time entrance hint (route-view.js buildSidebar): a soft, finite glow
-   on a viewer's very first multi-path route, paired with a toast — never
-   repeats once seen (localStorage-gated) and stops on its own (fixed
-   iteration count, not `infinite`) so it can't linger into a distraction.
-   4 iterations (~5.6s) roughly spans the toast's own 6s lifetime.
-   `outline`, not `box-shadow`: this element has `overflow: hidden`/`auto`
-   (for the scrollable path list) and an element's own `overflow` clips its
-   own box-shadow — outline isn't subject to that, so it's the only one of
-   the two that actually renders here. No size/position change either way,
-   so it doesn't reflow or nudge anything else in the sidebar. */
-@keyframes mc-rt-paths-pulse-kf {
-  0%, 100% { outline: 2px solid rgba(6, 182, 212, 0); outline-offset: 0; }
-  50% { outline: 2px solid rgba(6, 182, 212, 0.7); outline-offset: 2px; }
-}
-.mc-rt-paths-pulse {
-  animation: mc-rt-paths-pulse-kf 1.4s ease-in-out 4;
-}
-@media (prefers-reduced-motion: reduce) {
-  .mc-rt-paths-pulse { animation: none; }
-}
 .mc-rt-paths-header {
   display: flex;
   justify-content: space-between;
@@ -202,8 +194,6 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   padding: 4px 8px;
   cursor: pointer;
   font-size: 10px;
-  /* Brighter than --text-muted: this is an instruction ("click to isolate"),
-     not passive metadata, and was easy to miss at muted-caption brightness. */
   color: var(--text, #cbd5e1);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -251,9 +241,7 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
   border-bottom: 1px solid rgba(255,255,255,0.04);
   font-family: ui-monospace, Menlo, monospace;
 }
-/* Hover-revealed arrow: rows read as plain data rows without it — the
-   subtle background tint alone wasn't enough for people to realize each
-   row is clickable to isolate that path on the map. */
+/* Hover/focus-revealed arrow: signals that each row isolates its path. */
 .mc-rt-path-row::after {
   content: '\2192';
   position: absolute;

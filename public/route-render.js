@@ -153,8 +153,7 @@
     var base = 'Hop ' + (idx + 1) + ' of ' + total + ', ' + name + ', ' + role;
     if (p.isOrigin) base += ', originator';
     if (p.isDest) base += ', destination';
-    // "unresolved" implies we don't know what this hop is — untrue for a
-    // gpsless one, which is fully identified, just missing coordinates.
+    // A gpsless hop is identified, just missing coordinates.
     if (p.resolved === false) base += p.gpsless ? ', no GPS coordinates' : ', unresolved';
     return base;
   }
@@ -209,11 +208,6 @@
           'Legend' +
         '</button>' +
         '<div id="mc-route-legend-body" class="mc-route-legend-body">' +
-          // "resolved" here means "placed with real map data" — a gpsless
-          // hop is fully identified (name/role/pubkey known) but has no
-          // coordinates, so it counts against this without implying we
-          // don't know what the hop is. Call that out explicitly rather
-          // than leaving a same-node reader to guess why the count is low.
           '<div class="mc-route-resolved-badge" role="status">' +
             resolvedCount + ' of ' + totalCount + ' hops resolved' +
             (gpslessCount ? ' (' + gpslessCount + ' no GPS)' : '') +
