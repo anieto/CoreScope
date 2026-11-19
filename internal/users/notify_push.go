@@ -193,17 +193,17 @@ func (s *Store) RevokePushBinding(analyzerID, installationID string, userID int6
 type PushEvent struct {
 	UserID                int64
 	EventID, Event, Kind  string
-	NodePubkey            string
+	NodePubkey, NodeName  string
 	OccurredAt, ExpiresAt time.Time
 }
 
 // PushJob is a queued relay action. Only the notifier dispatches jobs.
 type PushJob struct {
-	ID                        int64
-	Operation, SubscriptionID string
-	EventID, Kind, NodePubkey string
-	OccurredAt, ExpiresAt     time.Time
-	Attempts                  int
+	ID                                  int64
+	Operation, SubscriptionID           string
+	EventID, Kind, NodePubkey, NodeName string
+	OccurredAt, ExpiresAt               time.Time
+	Attempts                            int
 }
 
 // ApplyNotifyChanges saves evaluator state and queues push deliveries atomically.
@@ -238,10 +238,10 @@ const pushWatchAllowed = `u.status = 'active'
 	AND (p.user_id IS NULL OR instr(',' || p.events || ',', ',' || e.event || ',') > 0)`
 
 func queuePushEvents(tx *sql.Tx, analyzerID string, now time.Time, events []PushEvent) error {
-	stmt, err := tx.Prepare(`WITH e(user_id,event_id,event,kind,node_pubkey,occurred_at,expires_at) AS (VALUES (?,?,?,?,?,?,?))
+	stmt, err := tx.Prepare(`WITH e(user_id,event_id,event,kind,node_pubkey,node_name,occurred_at,expires_at) AS (VALUES (?,?,?,?,?,?,?,?))
 		INSERT INTO notification_push_jobs
-			(analyzer_id,operation,subscription_id,user_id,event_id,event,kind,node_pubkey,occurred_at,expires_at)
-		SELECT b.analyzer_id,'deliver',b.subscription_id,e.user_id,e.event_id,e.event,e.kind,e.node_pubkey,e.occurred_at,e.expires_at
+			(analyzer_id,operation,subscription_id,user_id,event_id,event,kind,node_pubkey,node_name,occurred_at,expires_at)
+		SELECT b.analyzer_id,'deliver',b.subscription_id,e.user_id,e.event_id,e.event,e.kind,e.node_pubkey,e.node_name,e.occurred_at,e.expires_at
 		FROM e
 		JOIN notification_push_bindings b ON b.user_id = e.user_id AND b.analyzer_id = ?
 		JOIN users u ON u.id = b.user_id
@@ -253,7 +253,7 @@ func queuePushEvents(tx *sql.Tx, analyzerID string, now time.Time, events []Push
 	}
 	defer stmt.Close()
 	for _, e := range events {
-		if _, err := stmt.Exec(e.UserID, e.EventID, e.Event, e.Kind, e.NodePubkey, unix(e.OccurredAt), unix(e.ExpiresAt),
+		if _, err := stmt.Exec(e.UserID, e.EventID, e.Event, e.Kind, e.NodePubkey, e.NodeName, unix(e.OccurredAt), unix(e.ExpiresAt),
 			analyzerID, unix(now), unix(now)); err != nil {
 			return err
 		}
@@ -321,7 +321,7 @@ func (s *Store) DuePushJobs(analyzerID string, now time.Time, limit int) ([]Push
 	if err := s.prunePushWork(now); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT id, operation, subscription_id, event_id, kind, node_pubkey, occurred_at, expires_at, attempts
+	rows, err := s.db.Query(`SELECT id, operation, subscription_id, event_id, kind, node_pubkey, node_name, occurred_at, expires_at, attempts
 		FROM notification_push_jobs WHERE analyzer_id = ? AND next_at <= ?
 		ORDER BY next_at, id LIMIT ?`, analyzerID, unix(now), limit)
 	if err != nil {
@@ -332,7 +332,7 @@ func (s *Store) DuePushJobs(analyzerID string, now time.Time, limit int) ([]Push
 	for rows.Next() {
 		var job PushJob
 		var occurredAt, expiresAt int64
-		if err := rows.Scan(&job.ID, &job.Operation, &job.SubscriptionID, &job.EventID, &job.Kind, &job.NodePubkey,
+		if err := rows.Scan(&job.ID, &job.Operation, &job.SubscriptionID, &job.EventID, &job.Kind, &job.NodePubkey, &job.NodeName,
 			&occurredAt, &expiresAt, &job.Attempts); err != nil {
 			return nil, err
 		}

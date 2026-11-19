@@ -371,6 +371,10 @@ relay cannot reach the proof endpoint.
 
 **Test watched-node alerts**
 
+When CoreScope knows the node’s name, it sends it to the NodeScope relay
+for the notification text. Unnamed nodes use generic wording. Update the
+relay before updating CoreScope to send names.
+
 Users enable push from NodeScope on each device. CoreScope uses the same
 watched-node offline and battery rules for push and email. The email toggle
 and unsubscribe link control email delivery.

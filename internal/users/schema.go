@@ -249,6 +249,9 @@ var migrations = [][]string{
 				AND instr(',' || NEW.events || ',', ',' || event || ',') = 0;
 		END`,
 	},
+	{
+		`ALTER TABLE notification_push_jobs ADD COLUMN node_name TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 func (s *Store) migrate() error {

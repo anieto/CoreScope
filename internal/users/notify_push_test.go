@@ -71,7 +71,7 @@ func TestPushOutboxTracksWatchAndIgnoresEmailOptOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := PushEvent{UserID: u.ID, Event: NotifyNodeOffline, EventID: "event", Kind: "node.not_heard",
-		NodePubkey: nPkA, OccurredAt: clk.Now(), ExpiresAt: clk.Now().Add(time.Hour)}
+		NodePubkey: nPkA, NodeName: "Milliways 1W", OccurredAt: clk.Now(), ExpiresAt: clk.Now().Add(time.Hour)}
 	states := []NotifyState{nState(u.ID, NotifyNodeOffline, nPkA, NotifyBad, clk.Now())}
 	for range 2 {
 		if err := st.ApplyNotifyChanges(nil, states, "analyzer", []PushEvent{event}); err != nil {
@@ -79,7 +79,7 @@ func TestPushOutboxTracksWatchAndIgnoresEmailOptOut(t *testing.T) {
 		}
 	}
 	jobs, err := st.DuePushJobs("analyzer", clk.Now(), 10)
-	if err != nil || len(jobs) != 1 || jobs[0].EventID != "event" || jobs[0].Operation != "deliver" {
+	if err != nil || len(jobs) != 1 || jobs[0].EventID != "event" || jobs[0].Operation != "deliver" || jobs[0].NodeName != event.NodeName {
 		t.Fatalf("due jobs: %+v, %v", jobs, err)
 	}
 	job := jobs[0]
@@ -96,7 +96,7 @@ func TestPushOutboxTracksWatchAndIgnoresEmailOptOut(t *testing.T) {
 		t.Fatalf("retry already due: %+v, %v", jobs, err)
 	}
 	clk.Advance(time.Minute)
-	if jobs, err := st.DuePushJobs("analyzer", clk.Now(), 10); err != nil || len(jobs) != 1 || jobs[0].Attempts != 1 {
+	if jobs, err := st.DuePushJobs("analyzer", clk.Now(), 10); err != nil || len(jobs) != 1 || jobs[0].Attempts != 1 || jobs[0].NodeName != event.NodeName {
 		t.Fatalf("retry missing: %+v, %v", jobs, err)
 	}
 	if err := st.SetStatus(u.ID, StatusDisabled); err != nil {

@@ -64,6 +64,7 @@ type notifyRelayDeliveryRequest struct {
 	SubscriptionID string    `json:"subscription_id"`
 	Kind           string    `json:"kind"`
 	NodePubkey     string    `json:"node_pubkey"`
+	NodeName       string    `json:"node_name,omitempty"`
 	OccurredAt     time.Time `json:"occurred_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 }

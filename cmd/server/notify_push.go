@@ -83,7 +83,7 @@ func notifyPushKind(event, state string) string {
 	return ""
 }
 
-func notifyPushEvents(changes map[int64][]notifyChange, accounts map[int64]users.User) []users.PushEvent {
+func notifyPushEvents(changes map[int64][]notifyChange, accounts map[int64]users.User, nodes map[string]notifyNode) []users.PushEvent {
 	var events []users.PushEvent
 	for uid, transitions := range changes {
 		if accounts[uid].Status != users.StatusActive {
@@ -97,7 +97,8 @@ func notifyPushEvents(changes map[int64][]notifyChange, accounts map[int64]users
 			at := change.At.UTC()
 			events = append(events, users.PushEvent{
 				EventID: rand.Text(), UserID: uid, Event: change.Event,
-				Kind: kind, NodePubkey: change.Subject, OccurredAt: at, ExpiresAt: at.Add(time.Hour),
+				Kind: kind, NodePubkey: change.Subject, NodeName: mailSafeText(nodes[change.Subject].Name),
+				OccurredAt: at, ExpiresAt: at.Add(time.Hour),
 			})
 		}
 	}
@@ -191,7 +192,7 @@ func (n *notifier) dispatchPushJob(ctx context.Context, settings notifySettings,
 		case "deliver":
 			_, err = settings.relay.Deliver(ctx, settings.relayCredential, notifyRelayDeliveryRequest{
 				EventID: job.EventID, SubscriptionID: job.SubscriptionID, Kind: job.Kind,
-				NodePubkey: job.NodePubkey, OccurredAt: job.OccurredAt, ExpiresAt: job.ExpiresAt,
+				NodePubkey: job.NodePubkey, NodeName: job.NodeName, OccurredAt: job.OccurredAt, ExpiresAt: job.ExpiresAt,
 			})
 		case "revoke":
 			err = settings.relay.RevokeSubscription(ctx, settings.relayCredential, job.SubscriptionID)

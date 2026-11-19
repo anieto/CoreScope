@@ -33,14 +33,14 @@ func TestPushEventsUseOnlySupportedTransitionsForActiveAccounts(t *testing.T) {
 		inactive: {{Event: users.NotifyNodeOffline, Subject: evPkA, To: users.NotifyBad, At: at}},
 	}
 	accounts := map[int64]users.User{active: {Status: users.StatusActive}, inactive: {Status: users.StatusDisabled}}
-	got := notifyPushEvents(changes, accounts)
+	got := notifyPushEvents(changes, accounts, map[string]notifyNode{evPkA: {Name: "  Café\nRepeater  "}})
 	want := []string{"node.not_heard", "node.heard_again", "node.battery_low", "node.battery_recovered"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d events, want %d", len(got), len(want))
 	}
 	seen := map[string]bool{}
 	for i, event := range got {
-		if event.Kind != want[i] || event.UserID != active || event.NodePubkey != evPkA ||
+		if event.Kind != want[i] || event.UserID != active || event.NodePubkey != evPkA || event.NodeName != "Café Repeater" ||
 			event.Event != changes[active][i].Event || event.EventID == "" || seen[event.EventID] ||
 			!event.OccurredAt.Equal(at) || !event.ExpiresAt.Equal(at.Add(time.Hour)) {
 			t.Errorf("unexpected event: %+v", event)

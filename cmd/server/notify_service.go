@@ -224,7 +224,7 @@ func (n *notifier) tick(ctx context.Context) {
 	res := evaluateNotifications(notifyInput{Now: now, Health: n.src.health(), LowMv: n.src.lowBatteryMv(),
 		Accounts: accounts, Prefs: prefs, Watches: watches, States: states, Nodes: nodes,
 		Heard: heard, SharedSeen: n.src.sharedPrefixSeen(infra), OfflineAfter: n.offlineWindows(pubkeys, now), NewestPacket: n.src.newestPacket(), Observers: observers, ObserverOwners: owners, IngestStale: stale, IngestResumedAt: n.ingestResumedAt, External: external})
-	if err := n.saveNotificationChanges(res, accounts, pushEpoch); err != nil {
+	if err := n.saveNotificationChanges(res, accounts, nodes, pushEpoch); err != nil {
 		log.Printf("[notify] save notification changes, nothing mailed this time: %v", err)
 		return
 	}
@@ -237,7 +237,7 @@ func (n *notifier) tick(ctx context.Context) {
 		len(accounts), changes, mails, msFloat(time.Since(started)), msFloat(lock))
 }
 
-func (n *notifier) saveNotificationChanges(res notifyResult, accounts map[int64]users.User, pushEpoch uint64) error {
+func (n *notifier) saveNotificationChanges(res notifyResult, accounts map[int64]users.User, nodes map[string]notifyNode, pushEpoch uint64) error {
 	state := &n.a.nodeScopeDelivery
 	state.mu.RLock()
 	settings := n.a.nodeScopeRelaySettings()
@@ -245,7 +245,7 @@ func (n *notifier) saveNotificationChanges(res notifyResult, accounts map[int64]
 		defer state.mu.RUnlock()
 		var events []users.PushEvent
 		if !n.a.nodeScopeDeliveryPaused() && pushEpoch == state.epoch.Load() {
-			events = notifyPushEvents(res.Changes, accounts)
+			events = notifyPushEvents(res.Changes, accounts, nodes)
 		}
 		return n.a.st.ApplyNotifyChanges(res.Drop, res.States, settings.relayAnalyzerID, events)
 	}
