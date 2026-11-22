@@ -205,7 +205,7 @@ func regionSnapshotMembers(codes []string) (keys []string, known func(string) bo
 // (empty path), and the fewest hops any of them took. Observers' current IATA codes are used, like
 // resolveRegionObservers.
 func (db *DB) regionAdvertHearings(nodeDays int) ([]regionHearing, error) {
-	joinCond := "obs.rowid = o.observer_idx"
+	joinCond := "obs.idx = o.observer_idx"
 	if !db.isV3 {
 		joinCond = "obs.id = o.observer_id"
 	}
