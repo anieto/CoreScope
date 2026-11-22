@@ -26,6 +26,7 @@ type authService struct {
 	settingsPut *rateLimiter // PUT /api/account/settings, per user
 	companion   *rateLimiter // companion challenge + link, per IP and per user
 	repeater    *rateLimiter // repeater edit, claim and unclaim, per user
+	pushover    *rateLimiter // Pushover key checks and test messages, per user
 
 	// approved is the snapshot of approved hashtag channel names, filled at
 	// construction and reloaded from users.db after every proposal decision.
@@ -67,6 +68,7 @@ func newAuthService(set *userMgmtSettings, st *users.Store, m mailer.Mailer) *au
 		settingsPut: newRateLimiter(60, time.Hour),
 		companion:   newRateLimiter(60, time.Hour),
 		repeater:    newRateLimiter(120, time.Hour),
+		pushover:    newRateLimiter(10, time.Hour),
 		stop:        make(chan struct{}),
 		now:         time.Now,
 	}
