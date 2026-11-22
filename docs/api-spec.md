@@ -39,6 +39,7 @@
 - [GET /api/elevation/profile](#get-apielevationprofile)
 - [GET /api/planner/profile](#get-apiplannerprofile)
 - [GET /api/planner/relay](#get-apiplannerrelay)
+- [GET /api/planner/viewshed](#get-apiplannerviewshed)
 - [GET /api/planner/coverage](#get-apiplannercoverage)
 - [GET /api/analytics/rf](#get-apianalyticsrf)
 - [GET /api/analytics/topology](#get-apianalyticstopology)
@@ -128,7 +129,7 @@ These routes are registered only when `userManagement.enabled` is true. When it 
 | `GET /api/account/settings` | session | -> `{revision, generation, doc, allowlist}`. `doc` is `{v: 1, keys: {<localStorage key>: <raw string>}}`, or `null` at revision 0. `generation` is a random id of the stored document (`""` at revision 0): revisions restart at 1 after a `DELETE`, the generation does not repeat. `allowlist` is `[{key, kind, id?}]`: `kind` is `set` (JSON array merged per item; `id` names the field that identifies an item, absent means the item itself) or `scalar` |
 | `PUT /api/account/settings` | session | `{baseRevision, baseGeneration, doc}` -> `{revision, generation}`. `409` `{revision, generation, doc}` when `baseRevision` is not the stored revision or, with a stored document, `baseGeneration` is not its generation; `baseRevision` 0 without a stored document starts a new generation; `400` for another shape, a key that is never synced (`corescope_channel_*`, `live-channel-colors`, `meshcore-api-key`) or a key not in the allowlist; `413` when `doc` is over 256 KiB (body cap 264 KiB); `429` above 60 PUT requests per hour per user |
 | `DELETE /api/account/settings` | session | -> `{ok}`. The next `PUT` with `baseRevision` 0 starts a new document in a new generation |
-| `GET /api/account/export` | session | -> attachment `corescope-account-<YYYY-MM-DD>.json`: `{formatVersion: 1, exportedAt, instance, profile, sessions, companions, settings, proposals, notifications, audit, mail}`. `profile` is `{id, email, displayName, role, status, createdAt, lastLoginAt, emailBouncing, activatedAt, activatedBy}` (`activatedBy` is the admin id, `null` for a link activation); `sessions` `[{kind, label?, createdAt, lastSeenAt, userAgent?}]` (`kind` is `web` or `device`, `label` the device name); `companions` `[{pubkey, name, linkedAt}]`; `settings` `{revision, updatedAt, doc}` or `null`; `proposals` `[{kind, subject, status, note, createdAt, decidedAt}]`; `notifications` `{prefs: {enabled, events} or null, watches: [{pubkey, createdAt}]}`; `audit` `[{at, action, actorUserId, targetUserId, detail}]` (other accounts by id only); `mail` `[{to, purpose, sentAt, status, statusAt, reason?, events}]`. No row caps. No password hash, no session, link or unsubscribe token and no companion link challenge. Writes a `user.export` audit row afterwards |
+| `GET /api/account/export` | session | -> attachment `corescope-account-<YYYY-MM-DD>.json`: `{formatVersion: 1, exportedAt, instance, profile, sessions, companions, settings, proposals, notifications, audit, mail}`. `profile` is `{id, email, displayName, role, status, createdAt, lastLoginAt, emailBouncing, activatedAt, activatedBy}` (`activatedBy` is the admin id, `null` for a link activation); `sessions` `[{kind, label?, createdAt, lastSeenAt, userAgent?}]` (`kind` is `web` or `device`, `label` the device name); `companions` `[{pubkey, name, linkedAt}]`; `settings` `{revision, updatedAt, doc}` or `null`; `proposals` `[{kind, subject, status, note, createdAt, decidedAt}]`; `notifications` `{prefs: {enabled, events} or null, watches: [{pubkey, createdAt}], pushDevices: [{analyzerId, installationId, expiresAt}]}` (`pushDevices` are mobile push device links); `audit` `[{at, action, actorUserId, targetUserId, detail}]` (other accounts by id only); `mail` `[{to, purpose, sentAt, status, statusAt, reason?, events}]`. No row caps. No password hash, no session, link or unsubscribe token and no companion link challenge. Writes a `user.export` audit row afterwards |
 | `DELETE /api/account` | session | `{currentPassword}` -> `{ok, message}`. `409` you are the last admin |
 | `GET /api/admin/users?status=&role=&q=&bouncing=` | admin | -> `[adminUser]`, at most 1000, newest first. `status` is `pending`, `active` or `disabled`; `role` is `user` or `admin`; `bouncing=1` keeps only addresses whose mail bounces (any other value is `400`) |
 | `GET /api/admin/users/{id}` | admin | -> `{user, sessions, mail, audit}` |
@@ -161,7 +162,7 @@ Error codes you can get on the routes above:
 | `502` | `"mail provider unavailable"` (mail refresh) |
 | `503` | `"mail could not be sent, try again later"` |
 
-With user management on, every endpoint that needs `X-API-Key` also accepts an admin session (plus the CSRF header for unsafe methods). A request that sends `X-API-Key` is judged on the key alone. `GET /api/config/client` gains `"userManagement": {"enabled": true}` only when the feature is on; that block also carries `"companionLinking": true` on servers with the device-token and companion routes, which CoreDrive RX checks before it shows its login (an older server answers those paths with the SPA page).
+With user management on, every endpoint that needs `X-API-Key` also accepts an admin session (plus the CSRF header for unsafe methods). A request that sends `X-API-Key` is judged on the key alone. `GET /api/config/client` gains `"userManagement": {"enabled": true}` only when the feature is on; that block also carries `"companionLinking": true` on servers with the device-token and companion routes, which CoreDrive RX checks before it shows its login (an older server answers those paths with the SPA page), and `"repeaterTokens": true` on servers whose device tokens can ask for the `repeater:claim` and `repeater:edit` scopes and whose repeater edits take a `baseRevision` (a mobile client offers native repeater claims and edits only then).
 
 ---
 
@@ -1542,7 +1543,7 @@ Line-of-sight profile along a chain of points, for the repeater planner at `#/to
 
 ### Common rules
 
-These rules apply to all three planner endpoints: this one, [`/api/planner/relay`](#get-apiplannerrelay) and [`/api/planner/coverage`](#get-apiplannercoverage).
+These rules apply to all planner endpoints: this one, [`/api/planner/relay`](#get-apiplannerrelay), [`/api/planner/viewshed`](#get-apiplannerviewshed) and [`/api/planner/coverage`](#get-apiplannercoverage).
 
 - **Opt-in.** Only available when `planner.enabled` is `true`. Otherwise the endpoints return `404`, and `/api/config/client` omits the `planner` block.
 - **Quantised input.** Points are rounded to 0.001°, antenna heights to 1 m, and `range` must be one of a fixed set. Coverage boxes are snapped outward to a 0.05° grid. Requests that round to the same values share one cache entry and one job.
@@ -1758,6 +1759,85 @@ Abbreviated: the `elev_m` arrays in `direct`, `leg_a` and `leg_b` are truncated 
 ```json
 { "error": "too_long" }
 ```
+
+### Response `404`
+
+```json
+{ "error": "planner disabled" }
+```
+
+---
+
+## GET /api/planner/viewshed
+
+Theoretical reach of one candidate repeater site, for the planner's Coverage tab. The server profiles the site to every cell of a grid around it and returns two classes per cell, plus the site's link to each known repeater within range. Common rules and the job protocol are described under [`/api/planner/profile`](#get-apiplannerprofile). A viewshed job shares the coverage endpoint's compute slot, queue limit and result cache.
+
+### Query Parameters
+
+| Param   | Type   | Default                         | Description |
+|---------|--------|---------------------------------|-------------|
+| `site`  | string | -                               | **Required.** The site as `lat,lon`. Must be within 50 km of a known node |
+| `h`     | number | `planner.newAntennaM` (10)      | Antenna height at the site, metres. Rounded to 1 m and clamped to 1 to 100 |
+| `rx`    | number | `planner.existingAntennaM` (5)  | Antenna height of the other repeater, for the Repeaters class and the links. Same limits as `h` |
+| `range` | number | `planner.defaultRangeKm` (30)   | Radius in km of the grid and of the link list. One of `10,15,20,30,40,50,60`, up to `planner.maxLegKm` |
+
+### Response `200`
+
+```json
+{
+  "source": "SRTM (AWS Open Data)",
+  "params": {
+    "site": {"lat": 30.11, "lon": -97.09},
+    "antenna_m": 10,
+    "rx_antenna_m": 5,
+    "range_km": 30,
+    "frequency_mhz": 910.525,
+    "k_factor": 1.333,
+    "user_reach": {"d50_km": 2.7, "slope": 0.3}
+  },
+  "bbox": [29.8402, -97.4027, 30.3798, -96.7773],
+  "rows": 301,
+  "cols": 301,
+  "cell_km": 0.2,
+  "cells": "AAAAQkJDQ0RE...",
+  "links": [
+    {
+      "pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "name": "Example Hilltop",
+      "lat": 30.1,
+      "lon": -97.1,
+      "link": {"distance_km": 1.43, "clearance_pct": 212.4, "verdict": "clear", "worst_km": 0.7, "obstruction_m": -14.2}
+    }
+  ],
+  "warnings": [],
+  "truncated": false
+}
+```
+
+Abbreviated: `cells` is truncated for readability.
+
+| Field | Description |
+|-------|-------------|
+| `source` | Terrain attribution |
+| `params` | The quantised inputs the result was computed with, the radio settings and the users reach curve (`planner.userReach`) |
+| `bbox` | `[s, w, n, e]` of the grid in degrees: the site ± `range_km` |
+| `rows`, `cols` | Grid size. Cell (r, c) is centred in the r-th of `rows` equal latitude bands from the north and the c-th of `cols` equal longitude bands from the west |
+| `cell_km` | Nominal cell size: 0.2 km, or `range_km / 150` above 30 km |
+| `cells` | Base64 of `rows × cols` bytes, row 0 north, row-major. Low nibble: Users class 1 to 5 from the handheld reach curve `P(d) = 1 / (1 + exp((ln d - ln d50) / slope))` (1: P below 0.10, 2: below 0.25, 3: below 0.50, 4: below 0.75, 5: 0.75 or more), two classes lower (at least 1) where a 1.5 m receiver is in deep terrain shadow. High nibble: Repeaters class for a receiver at `rx`, from the first-Fresnel clearance of the site-to-cell path: 1 blocked (below -20%), 2 slightly blocked (-20% to 0%), 3 line of sight (0% or more). These bounds differ from the link `verdict` on purpose: checked against one repeater's heard links, every link heard within 16 km had a clearance between 2% and 54%. A nibble of 0 means no data: outside `range_km`, or no terrain at the cell, the site or the path between |
+| `links` | Known repeaters within `range_km` (rooms and stale repeaters excluded, as in `/api/planner/relay`, and repeaters within 100 m of the site, which are the site itself), nearest first. Each carries `pubkey`, `name`, `lat`, `lon` and a `link` object (see [`/api/planner/relay`](#get-apiplannerrelay)) for the site at `h` to the repeater at `rx`. The `link` has no `elev_m` profile. Always an array |
+| `warnings` | Human-readable notes, for example missing terrain tiles. Always an array |
+| `truncated` | `true` when the grid holds more repeaters and rooms than the planner reads for one job (300) and the farthest one kept is still within `range_km`, so a repeater in range may be missing from `links`. `false` when the cut only dropped nodes beyond `range_km` (the corners of the square grid) |
+
+### Error codes
+
+| Message or code | Cause |
+|-----------------|-------|
+| `site required` | Site missing |
+| `site must be lat,lon within range` | Site malformed or out of range |
+| `h must be a number of metres`, `rx ...` | Height is not a number |
+| `range must be one of 10,15,20,30,40,50,60` | Range not in the allowed set. The message lists the values allowed up to `planner.maxLegKm` |
+| `out_of_area` | The site is not within 50 km of a known node |
+| `too_many_tiles` | The grid needs more 1° terrain tiles than the server loads for one request. Any site within latitudes -56 to 60 at any offered range fits |
 
 ### Response `404`
 
