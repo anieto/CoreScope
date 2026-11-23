@@ -715,6 +715,14 @@
     var dark = (map && typeof map._mcBaseDark === 'boolean') ? map._mcBaseDark :
       (root.getAttribute('data-theme') === 'dark' ||
       (root.getAttribute('data-theme') !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches));
+    // Satellite and topographic maps are too busy for the light shade to
+    // show: darken them more and draw a solid white outline.
+    if (map && map._mcBaseBusy) {
+      return L.polygon([world, hole], {
+        interactive: false, color: '#fff', weight: 2, opacity: 0.9,
+        fillColor: '#000', fillOpacity: 0.4, renderer: renderer,
+      });
+    }
     var outside = L.polygon([world, hole], {
       interactive: false,
       color: dark ? '#94a3b8' : '#64748b', weight: 1, opacity: 0.5, dashArray: '4 4',

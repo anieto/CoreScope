@@ -685,6 +685,77 @@ test('attach: two maps on one page are independent', () => {
   assert.ok(m2._layers.includes(h2.group));
 });
 
+// MeshTexas: the picker tells the home-area shade whether the picked map is
+// dark and whether it is busy (satellite or topographic).
+test('picker: a pick sets the base map tone for the home-area shade', () => {
+  const s = makeSandbox({ theme: 'light' });
+  s.w.MC_MAP_CFG = { tiles: { providers: { eox: { enabled: true }, opentopomap: { enabled: true } } } };
+  s.w.MC_initTileRegistry(true);
+  const map = makeMap();
+  const fired = [];
+  map.fire = (e) => { fired.push(e); };
+  const h = s.w.MC_attachAutoTiles(map, { controlPosition: 'topleft' });
+  const c = s.stats.controls[s.stats.controls.length - 1];
+  const pick = (id) => { map.addLayer(c.baseMaps[id]); c.baseMaps[id]._events.add(); };
+  const tone = () => [map._mcBaseDark, !!map._mcBaseBusy];
+  pick('eox-s2-2025');
+  assert.deepStrictEqual(tone(), [false, true], 'satellite is busy');
+  pick('carto-dark');
+  assert.deepStrictEqual(tone(), [true, false], 'a dark street map');
+  pick('opentopomap');
+  assert.deepStrictEqual(tone(), [false, true], 'topographic is busy');
+  const n = fired.length;
+  pick('opentopomap');
+  assert.strictEqual(fired.length, n, 'no event without a change');
+  map._handlers.baselayerchange({ name: '__auto__' });
+  assert.deepStrictEqual(tone(), [null, false], 'Auto follows the theme');
+  assert.ok(fired.every(e => e === 'mc-basemap-tone'), fired.join());
+  h.destroy();
+});
+
+// MeshTexas: the expanded list fits the visible map (above bottomInset) and
+// scrolls; Leaflet alone measured the whole map, under the Live replay bar.
+test('picker: the expanded list fits above the bottom inset and scrolls', () => {
+  const s = makeSandbox();
+  const cls = (el) => el._cls || (el._cls = new Set());
+  s.ctx.L.DomUtil = {
+    hasClass: (el, c) => cls(el).has(c),
+    addClass: (el, c) => { cls(el).add(c); },
+    removeClass: (el, c) => { cls(el).delete(c); },
+  };
+  const layers = s.ctx.L.control.layers;
+  s.ctx.L.control.layers = function () {
+    const c = layers.apply(this, arguments);
+    c._container = {};
+    c._section = { style: { height: '' }, scrollHeight: 800, getBoundingClientRect: () => ({ top: 176 }) };
+    c.expand = function () { cls(c._container).add('leaflet-control-layers-expanded'); return c; };
+    return c;
+  };
+  let bottom = 900;
+  s.w.innerHeight = 900;
+  const map = makeMap();
+  map.getContainer = () => ({ getBoundingClientRect: () => ({ bottom }) });
+  const boxes = [];
+  const h = s.w.MC_attachAutoTiles(map, { controlPosition: 'topright', bottomInset: (box) => { boxes.push(box); return 80; } });
+  const c = s.stats.controls[0];
+  const sec = c._section;
+  map._handlers.resize();
+  assert.strictEqual(sec.style.height, '', 'collapsed: untouched');
+  c.expand();
+  assert.strictEqual(sec.style.height, (900 - 80 - 176 - 12) + 'px');
+  assert.ok(cls(sec).has('leaflet-control-layers-scrollbar'), 'scrolls');
+  assert.strictEqual(boxes[0].top, 176, 'bottomInset gets the list box');
+  s.w.innerHeight = 1300; bottom = 1300;
+  map._handlers.resize();
+  assert.strictEqual(sec.style.height, '', 'fits a taller window');
+  assert.ok(!cls(sec).has('leaflet-control-layers-scrollbar'));
+  bottom = 700; // the map ends above the viewport's bottom
+  map._handlers.resize();
+  assert.strictEqual(sec.style.height, (700 - 176 - 12) + 'px');
+  h.destroy();
+  assert.ok(!map._handlers.resize, 'resize handler removed');
+});
+
 console.log('');
 console.log('map layer builder: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);
